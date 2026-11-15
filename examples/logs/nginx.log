@@ -1,0 +1,3 @@
+192.0.2.10 - - [13/Nov/2026:18:00:00 +0800] "GET / HTTP/1.1" 200 512 "-" "SyntheticBrowser" request_id=req-normal
+198.51.100.23 - - [13/Nov/2026:18:01:02 +0800] "POST /api/template HTTP/1.1" 500 64 "-" "SyntheticProbe" request_id=req-probe
+198.51.100.23 - - [13/Nov/2026:18:01:04 +0800] "GET /admin/export HTTP/1.1" 403 32 "-" "SyntheticProbe" request_id=req-denied

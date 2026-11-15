@@ -1,0 +1,3 @@
+<Events>
+<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event"><System><Provider Name="Microsoft-Windows-Security-Auditing"/><EventID>4625</EventID><TimeCreated SystemTime="2026-11-13T10:02:00.000Z"/><EventRecordID>1001</EventRecordID><Channel>Security</Channel><Computer>synthetic-web-02</Computer></System><EventData><Data Name="TargetUserName">test-user</Data><Data Name="LogonType">3</Data><Data Name="IpAddress">198.51.100.23</Data><Data Name="Status">0xc000006d</Data></EventData></Event>
+</Events>

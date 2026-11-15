@@ -1,0 +1,6 @@
+2026-11-13T18:00:00+08:00 INFO [http-1] app.Web request_id=req-normal GET / completed status=200
+2026-11-13T18:01:02+08:00 ERROR [http-2] app.Template request_id=req-probe template rejected
+java.lang.IllegalArgumentException: expression is not allowed
+    at example.Template.render(Template.java:42)
+    at example.Web.handle(Web.java:18)
+2026-11-13T18:01:04+08:00 WARN [http-3] app.Auth request_id=req-denied authorization denied principal=anonymous
