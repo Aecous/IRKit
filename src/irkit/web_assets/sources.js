@@ -1,22 +1,24 @@
 import {esc} from './timeline.js';
-export const sourceStates={pending:'待派发',assigned:'已派发',running:'行为复查中',needs_incremental:'有增量待补查',awaiting_review:'待独立复核',reviewed:'已复核'};
-const judgments={suspected:'疑似来源',attack_evidenced:'存在攻击行为证据',excluded:'已排除（限已查范围）',inconclusive:'无法判定'};
 const trusts={unverified:'来源可信度未验证',direct_peer:'日志直连对端',trusted_proxy:'已声明可信代理（需依据）'};
+const outcomes={hits:'有命中',zero_hits:'限定范围内无命中',incomplete:'检查未完成',inconclusive:'无法定论'};
 const ref=(id,label)=>'<button class="ref" data-object="'+esc(id)+'">'+esc(label||id)+'</button>';
 export function sourceCardHTML(o){
- const s=o.investigation||{}, cards=Object.values(o.cards||{}).filter(c=>c.linked);
- return '<button class="entry source-card" data-object="'+esc(o.id)+'"><div class="meta"><span class="event-state '+(s.complete?'':'event-open')+'">'+esc(sourceStates[s.state]||'待检查')+'</span><span>'+esc(judgments[o.judgment]||o.judgment)+'</span></div><h2>'+esc(o.address)+'</h2><p>'+esc(o.reason)+'</p><div class="event-foot">'+esc(o.field)+' · '+esc(trusts[o.attribution]||o.attribution)+'</div><div class="source-summary"><span>'+cards.length+' 个关联事件</span><span>'+new Set(cards.map(c=>c.environment)).size+' 个环境</span><span>'+(s.missing_card_ids||[]).length+' 个待覆盖事件</span></div></button>';
+ const cards=o.cards||[], checks=o.checks||[];
+ return '<button class="entry source-card" data-object="'+esc(o.id)+'"><div class="meta">事件卡聚合 · '+esc(o.match_mode)+'</div><h2>'+esc(o.address)+'</h2><div class="event-foot">'+esc(o.field)+' · '+esc(trusts[o.attribution]||o.attribution)+'</div><div class="source-summary"><span>'+cards.filter(c=>c.current).length+' 个当前事件</span><span>'+checks.filter(c=>c.current).length+' 条有效检查关联</span><span>'+checks.filter(c=>c.historical).length+' 条历史检查关联</span><span>'+(o.gaps||[]).length+' 条缺口/待查提示</span></div></button>';
 }
 export function sourceDetailHTML(o){
- const s=o.investigation||{};
- let html='<h2>'+esc(o.address)+'</h2><span class="event-state">'+esc(sourceStates[s.state]||'待检查')+'</span><p>'+esc(judgments[o.judgment]||o.judgment)+(s.complete?'':' · 历史判断不能代替当前增量复查')+'</p><p>'+esc(o.judgment_note)+'</p><div class="event-scope">来源字段：'+esc(o.field)+'<br>匹配方式：'+esc(o.match_mode)+'<br>'+esc(trusts[o.attribution]||o.attribution)+'</div><p>来源关联不自动证明同一攻击者或因果关系。</p><h2>关联事件与观测范围</h2>';
- for(const c of Object.values(o.cards||{}))html+='<section class="source-event">'+ref(c.id,c.title)+'<div class="event-foot">r'+c.revision+' · '+esc(c.environment)+' / '+esc(c.asset)+'<br>'+esc(c.time_range)+'<br>'+esc(c.linked?'关联中':'已撤销关联（历史保留）')+' · '+esc(c.status)+'</div>'+(s.missing_card_ids?.includes(c.id)?'<span class="event-state event-open">尚未被当前复查覆盖</span>':'')+'</section>';
- html+='<h2>行为复查任务</h2>'+(o.tasks||[]).map(sourceTaskHTML).join('');
+ let html='<h2>'+esc(o.address)+'</h2><div class="event-scope">来源字段：'+esc(o.field)+'<br>匹配方式：'+esc(o.match_mode)+'<br>'+esc(trusts[o.attribution]||o.attribution)+'</div><p>从事件卡聚合；没有检查不代表没有攻击，同一来源不自动证明同一攻击者。检查有效仅指引用仍有效，不代表所有行为已解释。</p><h2>关联事件与观测范围</h2>';
+ for(const c of o.cards||[])html+='<section class="source-event">'+ref(c.id,c.title)+'<div class="event-foot">r'+esc(c.revision)+' · '+esc(c.environment)+' / '+esc(c.asset)+'<br>'+esc(c.time_range)+' · '+esc(c.current?'当前事件':'历史或待复核事件')+'</div></section>';
+ html+='<h2>已查范围与结果</h2>';
+ for(const c of o.checks||[])html+='<section class="source-event">'+ref(c.id,c.question)+'<div class="event-foot">'+esc(c.historical?'历史来源复查记录':c.current?'当前检查':'过期或待复核检查')+' · '+ref(c.card_id,'关联事件')+'</div><p>已查范围：'+esc(c.scope)+'</p><p>结果：'+esc(outcomes[c.outcome]||c.outcome)+'</p><p>结论：'+esc(c.conclusion||'未单独记录，见检查和事件卡')+'</p><p>限制：'+esc(c.limitations)+'</p>'+(c.query_ids||[]).map(id=>ref(id,'查看查询')).join('')+'</section>';
+ if(!(o.checks||[]).length)html+='<p>尚未关联来源行为检查。</p>';
+ html+='<h2>缺口与待查问题</h2>'+(o.gaps||[]).map(g=>'<p>'+esc(g)+'</p>').join('');
+ if(o.legacy_task_ids?.length)html+='<h3>历史来源任务（不再单独派发）</h3>'+o.legacy_task_ids.map(id=>ref(id)).join('');
  return html;
 }
 export function sourceTaskHTML(t){
  const r=t.source_result, snap=t.source_snapshot||{};
- let html='<section class="source-task">'+ref(t.id,t.question)+'<div class="event-foot">'+esc(t.status)+' · 固定 '+Object.keys(snap.datasets||{}).length+' 个数据集 / '+Object.keys(snap.cards||{}).length+' 个事件<br>本轮增量 '+(t.source_delta_card_ids||[]).length+' 个事件 · 可复用 '+Object.keys(t.source_base_checks||{}).length+' 项既有查询检查</div><p>'+esc(t.scope)+'</p>';
+ let html='<section class="source-task">'+ref(t.id,t.question)+'<div class="event-foot">'+esc(t.status)+' · 历史快照 '+Object.keys(snap.datasets||{}).length+' 个数据集 / '+Object.keys(snap.cards||{}).length+' 个事件<br>本轮增量 '+(t.source_delta_card_ids||[]).length+' 个事件 · 可复用 '+Object.keys(t.source_base_checks||{}).length+' 项既有查询检查</div><p>'+esc(t.scope)+'</p>';
  if(r){html+='<h3>实际检查的行为</h3>'+r.behavior_categories.map(b=>'<div class="source-event"><strong>'+esc(b.behavior)+'</strong><p>'+esc(b.conclusion)+'</p>'+b.check_ids.map(id=>ref(id,'查看排查记录')).join('')+'</div>').join('')+'<p>证据缺口：'+esc(r.limitations)+'</p><p>综合复核：'+esc(t.source_review?.verdict==='supported'?'支持有界结论':t.source_review?.verdict==='needs_more_evidence'?'仍需补证':'尚未复核')+'</p>';}
  return html+'</section>';
 }

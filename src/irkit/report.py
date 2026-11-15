@@ -260,7 +260,6 @@ def _render_report(store, assessment, gaps, next_questions, delivery, report_con
     lines += ["", "### 缺口与下一步", ""]
     lines += [f"- 缺口：{safe(gap)}" for gap in gaps]
     lines += [f"- 待验证：{safe(question)}" for question in next_questions]
-    leads = list(store.all("source_lead"))
     path = store.root / "reports" / f"{rid}.md"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return store.put(
@@ -279,10 +278,10 @@ def _render_report(store, assessment, gaps, next_questions, delivery, report_con
             "created": now(),
             "snapshot": [
                 {"id": o["id"], "revision": o["revision"]}
-                for o in cards + links + checks + datasets + followups + leads
+                for o in cards + links + checks + datasets + followups
             ],
         },
         object_id=rid,
         con=con,
-        dependencies=[o["id"] for o in cards + links + checks + datasets + followups + leads],
+        dependencies=[o["id"] for o in cards + links + checks + datasets + followups],
     )

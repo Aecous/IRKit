@@ -39,12 +39,10 @@ def snapshot(store):
             obj["investigation"] = {
                 side: events.direction_state(store, obj, side, tasks) for side in ("upstream", "downstream")
             }
-        if kind == "source_lead":
-            obj["investigation"] = source_leads.source_state(store, obj, tasks)
         objects.append(obj)
     return {
         "case": json.loads((store.root / "case.json").read_text()),
-        "objects": objects,
+        "objects": [o for o in objects if o["kind"] != "source_lead"] + source_leads.aggregate(store),
         "version": version,
         "limit": 2000,
         "counts": store.counts(),
@@ -194,7 +192,12 @@ def create_server(case_dir, port=8765):
                 if parsed.path == "/api/snapshot":
                     self.send(snapshot(store))
                 elif parsed.path == "/api/object":
-                    obj = store.get(args["id"])
+                    if args["id"].startswith("source_view_"):
+                        obj = next((o for o in source_leads.aggregate(store) if o["id"] == args["id"]), None)
+                        if obj is None:
+                            raise ValueError("Source aggregation no longer exists; refresh the view")
+                    else:
+                        obj = store.get(args["id"])
                     if obj["kind"] in ("card", "link", "check", "source_lead"):
                         obj["history"] = integrity.history(store, obj["id"], limit=10)
                     if obj["kind"] == "card" and obj.get("event"):
@@ -202,13 +205,10 @@ def create_server(case_dir, port=8765):
                             side: events.direction_state(store, obj, side)
                             for side in ("upstream", "downstream")
                         }
-                    if obj["kind"] == "source_lead":
-                        obj["investigation"] = source_leads.source_state(store, obj)
-                        obj["tasks"] = [store.get(tid, "task") for tid in obj["investigation"]["task_ids"]]
                     self.send(obj)
-                elif parsed.path == "/api/source-queue":
+                elif parsed.path in ("/api/sources", "/api/source-queue"):
                     self.send(
-                        source_leads.source_queue(
+                        source_leads.source_overview(
                             store, int(args.get("limit", 30)), int(args.get("offset", 0))
                         )
                     )

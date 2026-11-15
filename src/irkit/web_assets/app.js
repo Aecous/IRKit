@@ -23,7 +23,7 @@ function transcript(){
  const view=conversation(displayedEvents(),context);
  for(const a of view.agents){
   const linked=state.objects.filter(t=>t.kind==='task'&&a.taskIds.has(t.id));
-  if(a.id!=='main'&&linked.some(t=>t.source_lead_id)){a.name='来源行为复查';a.description=linked.filter(t=>t.source_lead_id).map(t=>t.question).join(' · ');}
+  if(a.id!=='main'&&linked.some(t=>t.source_lead_id)){a.name='来源行为复查（历史）';a.description=linked.filter(t=>t.source_lead_id).map(t=>t.question).join(' · ');}
   if(a.id!=='main'&&a.status==='interrupted'&&!a.failed&&linked.length&&linked.every(t=>t.status==='completed')){a.status='ended';a.last='任务产物已交付';}
  }
  return view;
@@ -45,7 +45,7 @@ function render(){
  el('session-status').innerHTML=!current?'尚无会话':outcome?tag(outcome.status):ending?tag('ended'):tag('running');
  el('run-overview').className=outcome?.status==='completed'?'delivered':ending?'attention':'';
  el('run-overview').innerHTML='<strong>'+(!current?'准备开始日志调查':outcome?.status==='completed'?'综合报告已生成，等待人工审阅':ending?'本轮会话已结束'+(outcome?.status!=='completed'?' · 尚未完成报告交付':''):'调查正在进行')+'</strong><p>'+esc(outcome?.error||(!ending?view.agents.filter(a=>!a.ended&&a.at).map(a=>a.name+'：'+a.last).join(' · '):'可查看会话过程及已经保存的证据'))+'</p>'+(outcome?.report_ids||[]).map(id=>'<button class="small" data-object="'+esc(id)+'">查看报告</button>').join('');
- el('view-context').textContent=tab==='sources'?'本调查全部来源 · 判断与复查进度分别记录':(selected?.name||'全部 Agent')+' · 本地时间';
+ el('view-context').textContent=tab==='sources'?'本调查全部来源 · 从事件卡聚合已查范围、结果与缺口':(selected?.name||'全部 Agent')+' · 本地时间';
  el('follow-label').hidden=tab!=='run';el('message-filter').hidden=tab!=='run';el('older').hidden=tab!=='run'||!moreHistory();
  el('older').disabled=loading;el('older').textContent=loading?'正在加载…':'↑ 加载更早消息';
  if(tab==='run'){
@@ -53,30 +53,31 @@ function render(){
   const rows=view.entries.filter(e=>(!agent||e.agent===agent)&&matching(e)&&(filter==='all'||(filter==='text'?['text','thinking'].includes(e.kind):filter==='tool'?['tool','result'].includes(e.kind):e.kind==='error'||e.error)));
   reconcile(el('content'),rows.length?rows.map(e=>({key:e.key,kind:e.kind,html:messageHTML(e,view.agents.find(a=>a.id===e.agent),ending)})):[{key:'empty',kind:'empty',html:loading?'正在读取会话…':'当前已加载消息中没有匹配项。可继续向上加载历史或清除筛选。'}]);
  }else{
-  const rows=state.objects.filter(o=>o.kind===(tab==='cards'?'card':tab==='sources'?'source_lead':'report')&&(tab==='sources'||!agent||taskArtifacts.has(o.id)||taskIds.has(o.task_id)||taskIds.has(o.followup_task_id))&&matching(o));
-  reconcile(el('content'),rows.length?rows.map(o=>({key:o.id,kind:'artifact-row',html:o.kind==='source_lead'?sourceCardHTML(o):o.kind==='card'?eventCardHTML(o):item(o,o.statement||o.assessment||o.path)})):[{key:'empty',kind:'empty',html:'当前范围暂无产物'}]);
+  const rows=state.objects.filter(o=>o.kind===(tab==='cards'?'card':tab==='sources'?'source_view':'report')&&(tab==='sources'||!agent||taskArtifacts.has(o.id)||taskIds.has(o.task_id)||taskIds.has(o.followup_task_id))&&matching(o));
+  reconcile(el('content'),rows.length?rows.map(o=>({key:o.id,kind:'artifact-row',html:o.kind==='source_view'?sourceCardHTML(o):o.kind==='card'?eventCardHTML(o):item(o,o.statement||o.assessment||o.path)})):[{key:'empty',kind:'empty',html:'当前范围暂无产物'}]);
  }
  const artifacts=state.objects.filter(o=>['card','check','report'].includes(o.kind)&&(!agent||taskArtifacts.has(o.id)||taskIds.has(o.task_id)||taskIds.has(o.followup_task_id)));
  el('artifacts').innerHTML='<div class="artifact-label">'+(agent?'当前 Agent 关联产物':'案件最新产物')+' · 显示 '+Math.min(8,artifacts.length)+' / '+artifacts.length+'</div>'+artifacts.slice(0,8).map(o=>'<button class="artifact" data-object="'+esc(o.id)+'"><span>'+esc(o.kind==='card'?(o.event?'事件卡':'历史文本卡'):o.kind==='report'?'报告':'排查结论')+' · '+esc(statusNames[o.status]||o.status)+'</span><p>'+esc(o.event?.title||o.statement||o.conclusion||o.question||o.assessment||o.id)+'</p></button>').join('');
  if(tab==='run'&&el('follow').checked&&!loading)scroll.scrollTop=scroll.scrollHeight;
  else restoreAnchor(scroll,el('content'),anchor);
  updateLatest();
- el('footer').textContent=tab==='sources'?'来源黑板 · 仅本调查 · 更新来源关联不会改写已派发任务的输入快照':'已加载 '+events.length+' / '+(current?.event_count||0)+' 条会话事件 · '+(moreHistory()?'向上滚动继续读取历史':'当前视图历史已加载')+' · 搜索仅限已加载消息';
+ el('footer').textContent=tab==='sources'?'来源行为 · 仅本调查 · 聚合事件卡和普通检查，无独立复查队列':'已加载 '+events.length+' / '+(current?.event_count||0)+' 条会话事件 · '+(moreHistory()?'向上滚动继续读取历史':'当前视图历史已加载')+' · 搜索仅限已加载消息';
 }
 function updateLatest(){el('latest').hidden=tab!=='run'||el('follow').checked;}
 async function detail(id){
  showDetail(true);
  try{
  const o=await api("/api/object?id="+encodeURIComponent(id));
- let html='<div class="id">'+esc(o.id)+' · r'+o.revision+'</div><h2>'+esc(o.kind==='source_lead'?'来源调查':o.kind==='card'?eventTitle(o):(o.role||o.kind))+'</h2>'+tag(o.status)+(o.kind==='card'?'':'<p>'+esc(o.question||o.summary||o.conclusion||"")+'</p>');
- if(o.kind==="source_lead")html+=sourceDetailHTML(o);
+ let html='<div class="id">'+esc(o.id)+(o.revision?' · r'+esc(o.revision):'')+'</div><h2>'+esc(['source_view','source_lead'].includes(o.kind)?'来源行为':o.kind==='card'?eventTitle(o):(o.role||o.kind))+'</h2>'+(o.kind==='source_view'?'':tag(o.status))+(o.kind==='card'?'':'<p>'+esc(o.question||o.summary||o.conclusion||"")+'</p>');
+ if(o.kind==="source_view")html+=sourceDetailHTML(o);
+ if(o.kind==="source_lead")html+='<p>历史来源记录（独立复查流程已停用）</p><pre>'+esc(pretty(o))+'</pre>';
  if(o.kind==="task"){
-  if(o.source_lead_id)html+='<button class="ref" data-object="'+esc(o.source_lead_id)+'">关联来源黑板</button>'+sourceTaskHTML(o);
+  if(o.source_lead_id)html+='<button class="ref" data-object="'+esc(o.source_lead_id)+'">历史来源记录</button>'+sourceTaskHTML(o);
   html+='<button class="small" data-task-chat="'+esc(id)+'">定位关联 Agent 会话</button>';
   if(o.parent_card_id)html+='<button class="ref" data-object="'+esc(o.parent_card_id)+'">起点卡片 '+esc(o.parent_card_id)+'</button>';
  }
  if(['card','link','check'].includes(o.kind))html+=integrityHTML(o);
- if(o.kind==='card'){html+=eventDetailHTML(o);for(const lid of o.event?.source_lead_ids||[])html+='<button class="ref" data-object="'+esc(lid)+'">来源黑板 '+esc(state.objects.find(x=>x.id===lid)?.address||lid)+'</button>';}
+ if(o.kind==='card'){html+=eventDetailHTML(o);for(const source of state.objects.filter(x=>x.kind==='source_view'&&x.cards.some(c=>c.id===o.id)))html+='<button class="ref" data-object="'+esc(source.id)+'">来源行为 '+esc(source.address)+'</button>';}
  if(o.kind==="card"){
   const questions=state.objects.filter(t=>t.parent_card_id===id);
   html+='<h2>补证派发与复核记录</h2>'+(questions.map(t=>'<div class="edge">'+esc({upstream:"前置",downstream:"后续",both:"前后"}[t.direction]||"补证")+' · '+tag(t.status)+'<button data-object="'+esc(t.id)+'">'+esc(t.question)+'</button></div>').join("")||'<p>尚未派发独立补证任务'+(o.event?'，关键问题见上方':'')+'。</p>');

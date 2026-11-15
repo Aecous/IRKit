@@ -77,8 +77,20 @@ def iter_records(path, kind, encoding="utf-8"):
                 if len(line) > MAX_RECORD_BYTES:
                     raise ValueError(f"Record {ordinal} exceeds size limit; split source before analysis")
                 yield ordinal, line.rstrip("\r\n")
+    elif kind == "unsupported" and encoding == "latin-1":
+        # Byte-preserving LF records give custom parsers a stable raw reference.
+        with open(path, "rb") as stream:
+            ordinal = 0
+            while line := stream.readline(MAX_RECORD_BYTES + 1):
+                ordinal += 1
+                if len(line) > MAX_RECORD_BYTES:
+                    raise ValueError(f"Binary LF record {ordinal} exceeds 2 MiB")
+                yield ordinal, line.removesuffix(b"\n").decode("latin-1")
     else:
-        raise ValueError("Unsupported binary; convert outside this tool and register separately")
+        raise ValueError(
+            "Unsupported binary format; inspect SOURCE_PATHS in run_transform; "
+            "use encoding='latin-1' for byte-preserving LF references"
+        )
 
 
 def initialize_case(source_dir, cases_dir, background=""):

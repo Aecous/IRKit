@@ -63,7 +63,11 @@ def assess(store, after_event=0, after_change=0, exit_code=0, until=None):
             ending = p
         elif p.get("subtype") == "task_notification" and p.get("status") in ("stopped", "failed"):
             stopped.append(p.get("tool_use_id") or p.get("task_id"))
-    unfinished = [t["id"] for t in tasks.values() if t.get("status") != "completed"]
+    unfinished = [
+        t["id"]
+        for t in tasks.values()
+        if t.get("status") != "completed" and not (t.get("source_lead_id") and not t.get("parent_card_id"))
+    ]
     syntheses = [
         t["id"]
         for t in tasks.values()

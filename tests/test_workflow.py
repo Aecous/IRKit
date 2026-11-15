@@ -48,12 +48,14 @@ def test_model_provider_config_is_reused_without_persisting_secrets(case, tmp_pa
             assert "never-run" not in path.read_text()
 
 
-def test_missing_platform_boundary_fails_closed(case, monkeypatch):
-    monkeypatch.setattr("irkit.sandbox.platform.system", lambda: "Linux")
+@pytest.mark.parametrize("system", ["Darwin", "Linux"])
+def test_local_worker_does_not_require_platform_sandbox(case, monkeypatch, system):
+    monkeypatch.setattr("platform.system", lambda: system)
     sid = case.list("source")[0]["id"]
-    result = run_transform(case, [sid], "raise AssertionError('must never run')")
-    assert result["status"] == "failed"
-    assert "requires macOS sandbox-exec" in result["error"]
+    result = run_transform(case, [sid], "assert SOURCE_PATHS[SOURCE_IDS[0]].is_file()")
+    assert result["status"] == "succeeded", result
+    assert result["execution_mode"] == "local"
+    assert not (case.path(result["path"]) / "sandbox.sb").exists()
 
 
 def test_case_copy_is_immutable_and_config_is_data(case):
@@ -166,45 +168,54 @@ def test_oversized_result_does_not_create_an_infinite_page(case, dataset):
         read_query_result(case, result["id"])
 
 
-@pytest.mark.parametrize(
-    "sql",
-    [
-        "SELECT * FROM read_csv('/etc/passwd')",
-        "SELECT * FROM read_text('/etc/passwd')",
-        "ATTACH '/tmp/fake.duckdb' AS x",
-        "INSTALL httpfs",
-        "SELECT 1; SELECT 2",
-        "COPY (SELECT 1) TO '/tmp/irkit-must-not-write'",
-        "SET enable_external_access=true",
-    ],
-)
-def test_sql_rejects_external_effects(case, dataset, sql):
-    result = query_dataset(case, [dataset["id"]], sql)
-    assert result["status"] == "failed", result
+def test_sql_derived_tables_and_external_files(case, dataset, tmp_path):
+    import duckdb
+
+    external = tmp_path / "extra.csv"
+    external.write_text("tag\nsynthetic\n")
+    did = dataset["id"]
+    result = query_dataset(case, [did], f"""
+        CREATE TABLE picked AS SELECT _row_id, _refs FROM {did};
+        ALTER TABLE picked ADD COLUMN label VARCHAR;
+        UPDATE picked SET label='checked';
+        SELECT p.*, e.tag FROM picked p CROSS JOIN read_csv('{external}') e ORDER BY _row_id;
+    """)
+    assert result["status"] == "succeeded", result
+    assert result["statement_count"] == 4
+    assert result["preview"][0]["label"] == "checked"
+    assert result["preview"][0]["tag"] == "synthetic"
+    raw = result["preview"][0]["_refs"][0]
+    assert read_evidence(case, raw["source_id"], raw["start"], raw["end"])["records"]
+    scratch = case.path(result["scratch_database"])
+    with duckdb.connect(str(scratch), read_only=True) as db:
+        assert db.execute("SELECT count(*) FROM picked").fetchone()[0] == dataset["row_count"]
+    reused = query_dataset(case, [did], f"ATTACH '{scratch}' AS prior (READ_ONLY); SELECT * FROM prior.picked")
+    assert reused["status"] == "succeeded" and reused["saved_rows"] == dataset["row_count"]
+    baseline = query_dataset(case, [did], f"DELETE FROM {did}_db.events")
+    assert baseline["status"] == "failed"
+    assert dataset_row(case, did, 1)["_refs"]
 
 
-def test_sandbox_denies_host_network_and_source_mutation(case, tmp_path, monkeypatch):
-    secret = tmp_path / "secret.txt"
-    secret.write_text("do-not-read")
-    monkeypatch.setenv("IR_TEST_SECRET", "do-not-inherit")
+def test_local_transform_can_use_files_shell_and_network(case, tmp_path, monkeypatch):
+    external = tmp_path / "custom-format.txt"
+    external.write_text("payload=7")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "fixture-do-not-inherit")
     source = case.list("source")[0]
     code = f"""
-import os, socket
-assert "IR_TEST_SECRET" not in os.environ
-for action in [lambda: open({str(secret)!r}).read(),
-               lambda: open({str(case.path(source["path"]))!r}, "w"),
-               lambda: socket.socket().connect(("127.0.0.1", 9))]:
-    try:
-        action()
-    except PermissionError:
-        pass
-    else:
-        raise AssertionError("sandbox allowed forbidden action")
+import os, socket, subprocess
+assert "ANTHROPIC_AUTH_TOKEN" not in os.environ
+assert open({str(external)!r}).read() == "payload=7"
+assert subprocess.check_output(["/bin/sh", "-c", "printf ready"]).decode() == "ready"
+with socket.socket() as server:
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    with socket.create_connection(server.getsockname()) as client:
+        conn, address = server.accept()
+        conn.close()
 emit({{"verified": True}}, [{{"source_id": {source["id"]!r}, "start": 1, "end": 1}}])
 """
     result = run_transform(case, [source["id"]], code)
     assert result["status"] == "succeeded", result
-    assert secret.read_text() == "do-not-read"
 
 
 def test_timeout_and_bad_provenance(case):

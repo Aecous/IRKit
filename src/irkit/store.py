@@ -152,10 +152,6 @@ class Store:
             "INSERT INTO changes(object_id,action,at,detail) VALUES (?,?,?,?)",
             (object_id, "create", timestamp, dumps(data)),
         )
-        if kind == "card":
-            from .source_leads import sync_card
-
-            sync_card(self, self.get(object_id, con=con), con)
         return self.get(object_id, con=con)
 
     def assert_live_dependencies(self, object_id, con):
@@ -223,10 +219,6 @@ class Store:
                     )
                 elif obj["kind"] in ("check", "report"):
                     self.update(obj["id"], {"status": "stale", "stale_because": object_id}, con=con)
-        if old["kind"] == "card":
-            from .source_leads import sync_card
-
-            sync_card(self, self.get(object_id, con=con), con)
         return self.get(object_id, con=con)
 
     def path(self, relative):

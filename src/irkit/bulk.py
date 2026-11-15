@@ -10,7 +10,7 @@ import sys
 import time
 from pathlib import Path
 
-from .sandbox import run_isolated
+from .execution import run_process
 from .store import Store, dumps, now, uid
 
 
@@ -164,7 +164,7 @@ def drive(store, run_id):
             outcome = (
                 {"status": "succeeded"}
                 if (directory / "metadata.json").is_file()
-                else run_isolated(
+                else run_process(
                     [
                         sys.executable,
                         "-I",
@@ -172,9 +172,7 @@ def drive(store, run_id):
                         str(directory / "config.json"),
                     ],
                     directory,
-                    [store.path(source["path"])],
-                    timeout=1800,
-                    file_limit_mb=16384,
+                    timeout=0,
                 )
             )
             if outcome["status"] != "succeeded":

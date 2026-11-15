@@ -127,19 +127,12 @@ def task_readiness(store, task_id, artifact_ids=None):
                         "action": "Submit a check against current body inspection/decoding coverage",
                     }
                 )
-    if task["status"] != "completed":
-        from .source_leads import source_task_issues
-
-        issues.extend(source_task_issues(store, task, items))
     return {"task_id": task_id, "ready": not issues, "issues": issues}
 
 
 def closure_readiness(store):
     """Check case-wide work, including tasks omitted from synthesis inputs."""
     issues = delivery_issues(store)
-    from .source_leads import source_issues
-
-    issues.extend(source_issues(store))
     from .events import event_queue
 
     offset = 0
@@ -161,7 +154,7 @@ def closure_readiness(store):
             break
         offset = page["next_offset"]
     for task in store.all("task"):
-        if task["role"] == "ir-synthesize":
+        if task["role"] == "ir-synthesize" or (task.get("source_lead_id") and not task.get("parent_card_id")):
             continue
         if task["status"] != "completed":
             issues.append(
@@ -173,15 +166,7 @@ def closure_readiness(store):
                 }
             )
             continue
-        # A reviewed replacement covers obsolete source outputs without reviving or deleting them.
-        source_replaced = False
-        if task.get("source_lead_id"):
-            from .source_leads import source_state
-
-            state = source_state(store, store.get(task["source_lead_id"], "source_lead"))
-            source_replaced = state["complete"] and task["id"] not in state["reviewed_task_ids"]
-        if not source_replaced:
-            issues.extend(task_readiness(store, task["id"])["issues"])
+        issues.extend(task_readiness(store, task["id"])["issues"])
         if task.get("parent_card_id"):
             from .board import current_followup_review
 

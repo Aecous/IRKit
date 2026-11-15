@@ -236,14 +236,14 @@ def mcp(case: Annotated[Path, typer.Option()]):
 
 @app.command()
 def doctor():
-    """检查本地依赖和执行沙箱，不调用模型、不读取凭据。"""
+    """检查本地依赖和 Python 执行层，不调用模型、不读取凭据。"""
     import tempfile
 
-    from .sandbox import run_isolated
+    from .execution import run_process
 
     with tempfile.TemporaryDirectory(prefix="irkit-doctor-") as directory:
-        result = run_isolated(
-            [sys.executable, "-I", "-c", "import duckdb; print('sandbox ready')"], Path(directory), timeout=10
+        result = run_process(
+            [sys.executable, "-I", "-c", "import duckdb; print('local worker ready')"], Path(directory), timeout=10
         )
     typer.echo(
         dumps(
@@ -251,7 +251,7 @@ def doctor():
                 "python": sys.version.split()[0],
                 "claude": shutil.which("claude"),
                 "platform": platform.system(),
-                "sandbox": result,
+                "execution": result,
             }
         )
     )

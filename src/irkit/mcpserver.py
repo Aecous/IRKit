@@ -230,12 +230,15 @@ def build_server(case_dir):
         return ingest_status(store, run_id, wait_seconds)
 
     @mcp.tool()
-    def run_transform(source_ids: list[str], code: str, timeout: int = 90) -> dict:
-        """Run Python in a no-network macOS sandbox. records(sid, encoding='utf-8') yields (ordinal,text).
-        emit(fields, refs) creates dataset rows; refs=[{source_id,start,end,encoding?}].
-        Only approved source IDs may be read. Use stdlib, duckdb, Evtx. No pip/network/shell.
-        Preserve rejected/unparsed records as explicit parse_status rows; do not silently skip failures.
-        Multi-line events can cite a range. Limit 1M rows/256MB per run; partition larger cases.
+    def run_transform(source_ids: list[str], code: str, timeout: int = 0) -> dict:
+        """Run Python directly in a local subprocess on macOS/Linux, without per-call approval.
+        records(sid, encoding='utf-8') yields (ordinal,text); SOURCE_PATHS[sid] is the raw Path.
+        For unknown formats inspect bytes and write your own parser, using installed libraries or shell tools.
+        emit(fields, refs) creates rows; refs=[{source_id,start,end,encoding?}]. Preserve provenance.
+        Binary sources can be cited by LF-delimited byte spans using encoding='latin-1'.
+        Preserve unparsed records and failure counts. Multi-line events cite a range.
+        timeout=0 means no deadline; a positive value sets a wall-clock deadline in seconds.
+        Execution uses the current user's permissions; model credentials are not inherited in its environment.
         """
         return datasets.run_transform(store, source_ids, code, timeout)
 
@@ -250,8 +253,13 @@ def build_server(case_dir):
         return datasets.publish_dataset(store, run_id, description, field_notes, quality, query_examples)
 
     @mcp.tool()
-    def query(dataset_ids: list[str], sql: str, max_rows: int = 1000, timeout: int = 90) -> dict:
-        """One SELECT; tables named by dataset IDs. Can join datasets; no files, network, extensions.
+    def query(dataset_ids: list[str], sql: str, max_rows: int = 1000, timeout: int = 0) -> dict:
+        """Execute SQL in a local DuckDB subprocess; supports multiple statements and derived tables.
+        Each run has a persisted analysis.duckdb scratch database; the final statement is the returned result.
+        Published datasets are attached READ_ONLY under ds_ID_db and exposed as ds_ID views.
+        Use CREATE TABLE/INSERT/UPDATE on scratch tables, or ATTACH a previous run's scratch database.
+        Files and installed extensions are accessible. timeout=0 means no deadline.
+        Preserve _dataset_id/_row_id/_refs when deriving events for later evidence checks.
         With one or more dataset_ids, ir_all_events exposes UNION ALL BY NAME with an extra _dataset_id column.
         Reserved columns are _row_id (not row_id) and _refs; SELECT * already includes both.
         Duplicate result columns are renamed with __2 suffixes, recorded in column_mapping.
@@ -296,6 +304,8 @@ def build_server(case_dir):
          potential_impacts: ['hypotheses'],
          upstream: {question, priority:'critical|optional', status:'open|bounded|not_applicable', reason, check_ids:[]},
          downstream: {question, priority, status, reason, check_ids:[]}}.
+        Optional sources: [{address,field,match_mode:exact|forwarded_first,attribution,check_ids}].
+        Sources are event attributes, not separate review tasks.
         Unknown causes/effects can be []. Each list <=4. title<=160, observed<=1800 chars.
         Open critical questions enter event_queue; MAIN creates follow-ups linked to the card revision and direction.
         bounded requires actual checks documenting investigated limits; not_applicable/optional requires reason.
@@ -437,9 +447,12 @@ def build_server(case_dir):
         body_claim: str = "uninspected",
         body_run_ids: list[str] | None = None,
         body_reason: str = "",
+        conclusion: str = "",
     ) -> dict:
         """Record hits/zero_hits/incomplete/inconclusive. zero_hits requires successful untruncated
         queries returning ZERO ROWS (not COUNT=0); encode precise filters/time/columns in scope.
+        conclusion describes actual findings; limitations records unknowns and sampling limits.
+        Link source checks via event.sources[].check_ids; scope includes datasets/time/environment/source predicates.
         For a card follow-up, pass task_id and describe evidence gaps in limitations.
         body_claim=absent/present requires body_run_ids (exact inspection) or decode_run_ids (all filtered rows).
         not_required needs body_reason for metadata-only questions; uninspected cannot close tasks explicitly requiring body checks.
@@ -457,6 +470,7 @@ def build_server(case_dir):
             body_claim,
             body_run_ids,
             body_reason,
+            conclusion,
         )
 
     @mcp.tool()
@@ -537,86 +551,13 @@ def build_server(case_dir):
         return board.supersede_dataset(store, dataset_id, replacement_id, reason)
 
     @mcp.tool()
-    def register_source_lead(
-        address: str,
-        field: str,
-        match_mode: str,
-        card_ids: list[str],
-        reason: str,
-        attribution: str = "unverified",
-    ) -> dict:
-        """Register an IP source lead linked to real structured events, not a confirmed attacker identity.
-        field is the actual log column; match_mode exact/forwarded_first; attribution direct_peer/unverified/trusted_proxy.
-        Repeated registrations merge. Later submit_event(event.source_lead_ids=[id]) auto-updates this index.
+    def source_overview(limit: int = 30, offset: int = 0) -> dict:
+        """Read-only event-source aggregation; no separate source registration or review queue.
+        Sources live in event.sources: address, field, match_mode, attribution, check_ids.
+        Checks retain actual query scope/results/limitations. Missing checks do not mean no attack.
+        Investigate meaningful unexplained behavior via ordinary card follow-ups; no per-IP mandatory pass.
         """
-        return source_leads.register_source_lead(
-            store, address, field, match_mode, card_ids, reason, attribution
-        )
-
-    @mcp.tool()
-    def source_queue(limit: int = 30, offset: int = 0) -> dict:
-        """Source blackboard: linked event revisions, review tasks and uncovered deltas. MAIN dispatches,
-        workers only register findings. Paginate all sources before synthesis; confirmed and suspected
-        are evidence judgments, separate from assigned/running/reviewed workflow states.
-        """
-        return source_leads.source_queue(store, limit, offset)
-
-    @mcp.tool()
-    def plan_source_review(
-        lead_id: str, scope: str, question: str = "Review source behavior and unexplained branches"
-    ) -> dict:
-        """MAIN records a deduplicated task before native Agent(ir-investigate) dispatch. Does NOT spawn.
-        Pins source facts and all current dataset IDs; exposes source_delta_card_ids for incremental review.
-        Existing pending/running/failed tasks are reused. Do not run two agents for the same task_id.
-        """
-        return source_leads.plan_source_review(store, lead_id, scope, question)
-
-    @mcp.tool()
-    def source_behavior_overview(
-        lead_ids: list[str],
-        dataset_ids: list[str],
-        dimensions: list[str],
-        time_field: str | None = None,
-        max_rows: int = 1000,
-    ) -> dict:
-        """Batch compatible sources in one SQL aggregation over selected partitions, no malicious path filter.
-        Choose real columns for dimensions (e.g. asset/action/outcome) and optional timezone-aware time.
-        Missing columns require separate explicit queries; don't omit those datasets. Exact text matching,
-        forwarded_first extracts comma-delimited first hop but does not authenticate it. Normalize IPv6/ports
-        in a documented dataset if required. Read all result pages; grouping/truncation is not semantic coverage.
-        """
-        return source_leads.source_behavior_overview(
-            store, lead_ids, dataset_ids, dimensions, time_field, max_rows
-        )
-
-    @mcp.tool()
-    def complete_source_review(
-        task_id: str,
-        check_ids: list[str],
-        behavior_categories: list[dict],
-        limitations: str,
-        judgment: str,
-        note: str,
-        finding_card_ids: list[str] | None = None,
-    ) -> dict:
-        """Record result before update_task(completed). Each category: {behavior,conclusion,check_ids}.
-        Actual successful queries must cover assigned datasets. Attach raw-backed new events via source_lead_ids;
-        judgments suspected/attack_evidenced/excluded/inconclusive need independent synthesis review.
-        Result covers pinned inputs plus own new events; concurrently discovered external events remain a delta.
-        Existing observed hits may reference assigned current finding_card_ids; never create duplicate cards merely to complete review.
-        Return task revision then deliver result check/card IDs through update_task. Never equate query scope with reading every row.
-        """
-        return source_leads.complete_source_review(
-            store, task_id, check_ids, behavior_categories, limitations, judgment, note, finding_card_ids
-        )
-
-    @mcp.tool()
-    def review_source_task(task_id: str, synthesis_task_id: str, verdict: str, note: str) -> dict:
-        """Independent synthesis reviews exact source result and evidence: supported/needs_more_evidence.
-        Check unexplained endpoints/assets, actual query predicates, all result pages/truncation, shared exits,
-        forwarded trust and application-level impacts. Supported can acknowledge a demonstrated visibility gap.
-        """
-        return source_leads.review_source_task(store, task_id, synthesis_task_id, verdict, note)
+        return source_leads.source_overview(store, limit, offset)
 
     @mcp.tool()
     def render_report(

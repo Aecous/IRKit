@@ -26,8 +26,12 @@ def fact_hash(card):
     event = {
         k: v
         for k, v in card.get("event", {}).items()
-        if k not in ("upstream", "downstream", "source_lead_ids")
+        if k not in ("upstream", "downstream", "source_lead_ids", "sources")
     }
+    if "sources" in card.get("event", {}):
+        event["sources"] = [
+            {k: v for k, v in source.items() if k != "check_ids"} for source in card["event"]["sources"]
+        ]
     content = [card.get("statement"), card.get("evidence"), card.get("time_range"), event]
     return hashlib.sha256(json.dumps(content, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
@@ -460,7 +464,7 @@ def delivery_issues(store):
 def delivery_snapshot(store):
     return {
         o["id"]: o["revision"]
-        for kind in ("card", "link", "check", "source_lead", "environment_alias")
+        for kind in ("card", "link", "check", "environment_alias")
         for o in store.all(kind)
     }
 

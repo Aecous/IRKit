@@ -8,13 +8,13 @@ from pathlib import Path
 import duckdb
 
 from .evidence import raw_ref
-from .sandbox import run_isolated
+from .execution import run_process
 from .store import dumps, now, uid
 
 
-def run_transform(store, source_ids, code, timeout=90):
-    if not 1 <= timeout <= 300:
-        raise ValueError("Transform timeout must be 1..300 seconds")
+def run_transform(store, source_ids, code, timeout=0):
+    if type(timeout) is not int or timeout < 0:
+        raise ValueError("Timeout must be a nonnegative integer; 0 means no deadline")
     if not source_ids or len(code.encode()) > 256_000:
         raise ValueError("Sources required; code limit is 256KB")
     sources = {sid: store.get(sid, "source") for sid in source_ids}
@@ -43,7 +43,7 @@ def run_transform(store, source_ids, code, timeout=90):
         dependencies=source_ids,
     )
     try:
-        outcome = run_isolated(
+        outcome = run_process(
             [
                 sys.executable,
                 "-I",
@@ -52,7 +52,6 @@ def run_transform(store, source_ids, code, timeout=90):
                 directory / "config.json",
             ],
             directory,
-            [store.path(s["path"]) for s in sources.values()],
             timeout,
         )
         if outcome["status"] == "succeeded":
@@ -82,7 +81,6 @@ def publish_dataset(store, run_id, description, field_notes, quality, query_exam
         output.is_symlink()
         or not output.is_file()
         or output.stat().st_nlink != 1
-        or output.stat().st_size > 256 * 1024**2
     ):
         raise ValueError("Invalid transform output file")
     did = uid("ds")
@@ -102,8 +100,6 @@ def publish_dataset(store, run_id, description, field_notes, quality, query_exam
                         raise ValueError("Reference is outside approved run sources")
                     raw_ref(store, ref, counts=counts)
                 row_count += 1
-                if row_count > 1_000_000:
-                    raise ValueError("Dataset exceeds row limit")
                 if any(key.startswith("_") and key not in ("_row_id", "_refs") for key in row):
                     raise ValueError("Reserved field name")
                 row["_row_id"] = row_count
@@ -154,7 +150,7 @@ def publish_dataset(store, run_id, description, field_notes, quality, query_exam
         raise
 
 
-def query_dataset(store, dataset_ids, sql, max_rows=1000, timeout=90):
+def query_dataset(store, dataset_ids, sql, max_rows=1000, timeout=0):
     if not dataset_ids or not 1 <= max_rows <= 10000 or len(sql) > 40000:
         raise ValueError("Choose datasets, max_rows 1..10000, SQL <= 40000 chars")
     datasets = {did: store.get(did, "dataset") for did in dataset_ids}
@@ -179,15 +175,15 @@ def query_dataset(store, dataset_ids, sql, max_rows=1000, timeout=90):
             "datasets": dataset_ids,
             "sql": sql,
             "path": f"runs/{rid}",
+            "scratch_database": f"runs/{rid}/analysis.duckdb",
         },
         object_id=rid,
         dependencies=dataset_ids,
     )
     try:
-        outcome = run_isolated(
+        outcome = run_process(
             [sys.executable, "-I", Path(__file__).with_name("worker.py"), "query", directory / "config.json"],
             directory,
-            [store.path(ds["path"]) for ds in datasets.values()],
             timeout,
         )
         if outcome["status"] == "succeeded":

@@ -1,13 +1,12 @@
 import copy
 import json
-from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
 from irkit import board, events, integrity, report, telemetry
 from irkit import source_leads as sl
-from irkit.completion import assess, checkpoint
-from irkit.datasets import publish_dataset, query_dataset, read_query_result, run_transform
+from irkit.completion import assess
+from irkit.datasets import publish_dataset, query_dataset, run_transform
 from irkit.evidence import initialize_case
 from irkit.verification import closure_readiness
 from irkit.web import snapshot
@@ -98,78 +97,9 @@ def card_for(store, ds, row=1, title="Observed action", lead_ids=None, task=None
     return card
 
 
-def lead_for(store, ds, address="192.0.2.1", row=1):
-    card = card_for(store, ds, row, title="Observation " + address)
-    lead = sl.register_source_lead(
-        store, address, "client", "exact", [card["id"]], "Potential administrative misuse", "direct_peer"
-    )
-    return lead, store.get(card["id"])
-
-
-def start(store, lead):
-    task = sl.plan_source_review(store, lead["id"], "All published audit partitions")
-    return board.update_task(store, task["id"], task["revision"], "running")
-
-
-def finish(store, task, ds):
-    run = query_dataset(store, [ds["id"]], f"SELECT * FROM {ds['id']} WHERE client='192.0.2.1'")
-    check = board.submit_check(
-        store,
-        "Review source branches",
-        [run["id"]],
-        "inconclusive",
-        "Whole lab audit partition",
-        "Application permission boundary unavailable; cannot establish unauthorized access",
-        task_id=task["id"],
-        body_claim="not_required",
-        body_reason="Audit actions and results only",
-    )
-    updated = sl.complete_source_review(
-        store,
-        task["id"],
-        [check["id"]],
-        [
-            dict(
-                behavior="All recorded audit actions",
-                conclusion="Actions observed; access rights unknown",
-                check_ids=[check["id"]],
-            )
-        ],
-        "No permission baseline",
-        "inconclusive",
-        "No claim of compromise",
-    )
-    return board.update_task(
-        store,
-        task["id"],
-        updated["revision"],
-        "completed",
-        "Bounded source review",
-        list(updated["source_result"]["artifact_revisions"]),
-    )
-
-
 def synth(store):
     t = board.create_task(store, "ir-synthesize", "Independent review", "All current evidence", [])
     return board.update_task(store, t["id"], t["revision"], "running")
-
-
-def test_review_metadata_does_not_reopen_source_query(lab):
-    store, ds, _ = lab
-    lead, card = lead_for(store, ds)
-    task = finish(store, start(store, lead), ds)
-    review(store, task)
-    before = sl.source_state(store, store.get(lead["id"]))["snapshot"]
-    store.update(card["id"], {"review_state": "needs_review"})
-    assert not sl.source_state(store, store.get(lead["id"]))["complete"]
-    reviewer = synth(store)
-    card = store.get(card["id"])
-    integrity.resolve_review(
-        store, card["id"], card["revision"], "retain", "Facts and evidence are unchanged", reviewer["id"]
-    )
-    after = sl.source_state(store, store.get(lead["id"]))
-    assert after["snapshot"] == before
-    assert after["complete"]
 
 
 def test_review_plan_orders_parents_and_keeps_revision_guard(lab):
@@ -275,192 +205,6 @@ def test_resume_lifecycle_context_and_filtered_history(lab):
     assert any(e["payload"].get("subtype") == "task_notification" for e in nav)
 
 
-def review(store, task, synthesis=None):
-    synthesis = synthesis or synth(store)
-    return sl.review_source_task(
-        store,
-        task["id"],
-        synthesis["id"],
-        "supported",
-        "Queries and raw audit checked; permissions gap is real",
-    )
-
-
-def test_registration_merge_auto_updates_and_preserves_history(lab):
-    store, ds, _ = lab
-    lead, card = lead_for(store, ds)
-    again = sl.register_source_lead(
-        store,
-        lead["address"],
-        "client",
-        "exact",
-        [card["id"]],
-        "Potential administrative misuse",
-        "direct_peer",
-    )
-    assert again["id"] == lead["id"] and len(list(store.all("source_lead"))) == 1
-    newer = card_for(store, ds, 3, "Setting change", lead_ids=[lead["id"]])
-    lead = store.get(lead["id"])
-    assert set(lead["cards"]) == {card["id"], newer["id"]}
-    assert lead["judgment"] == "suspected"
-    before = sl.source_snapshot(store, lead)
-    event = copy.deepcopy(newer["event"])
-    event["title"] = "Clearer title"
-    revised = events.revise_event(store, newer["id"], newer["revision"], event, [], "Wording only")
-    lead = store.get(lead["id"])
-    assert lead["cards"][newer["id"]]["revision"] == revised["revision"]
-    assert sl.source_snapshot(store, lead) == before
-    event = copy.deepcopy(revised["event"])
-    event["observed"] = "Corrected recorded outcome"
-    revised = events.revise_event(
-        store, revised["id"], revised["revision"], event, [], "Corrected observation"
-    )
-    assert sl.source_snapshot(store, store.get(lead["id"])) != before
-    event = copy.deepcopy(revised["event"])
-    event["source_lead_ids"] = []
-    events.revise_event(store, revised["id"], revised["revision"], event, [], "Attribution withdrawn")
-    assert not store.get(lead["id"])["cards"][newer["id"]]["linked"]
-    assert integrity.history(store, lead["id"])["items"]
-
-
-def test_parallel_assignment_deduplicates_and_preserves_snapshot(lab):
-    store, ds, _ = lab
-    lead, card = lead_for(store, ds)
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        tasks = list(
-            pool.map(lambda _: sl.plan_source_review(store, lead["id"], "All available records"), range(2))
-        )
-    assert tasks[0]["id"] == tasks[1]["id"]
-    task = board.update_task(store, tasks[0]["id"], tasks[0]["revision"], "running")
-    frozen = copy.deepcopy(task["source_snapshot"])
-    newer = card_for(store, ds, 3, "Concurrent discovery", [lead["id"]])
-    assert store.get(task["id"])["source_snapshot"] == frozen
-    task = finish(store, task, ds)
-    review(store, task)
-    state = sl.source_state(store, store.get(lead["id"]))
-    assert state["state"] == "needs_incremental" and state["missing_card_ids"] == [newer["id"]]
-    delta = sl.plan_source_review(store, lead["id"], "New branch only")
-    assert delta["id"] != task["id"] and delta["source_delta_card_ids"] == [newer["id"]]
-    delta = board.update_task(store, delta["id"], delta["revision"], "running")
-    delta = finish(store, delta, ds)
-    review(store, delta)
-    assert sl.source_state(store, store.get(lead["id"]))["complete"]
-
-
-def test_completion_requires_real_coverage_and_independent_review(lab):
-    store, ds, _ = lab
-    lead, _ = lead_for(store, ds)
-    task = start(store, lead)
-    with pytest.raises(ValueError, match="SOURCE_RESULT_MISSING"):
-        board.update_task(
-            store, task["id"], task["revision"], "completed", "Claimed done", [next(store.all("card"))["id"]]
-        )
-    check = board.submit_check(
-        store, "Not queried", [], "inconclusive", "lab", "Not yet checked", task_id=task["id"]
-    )
-    with pytest.raises(ValueError, match="actual queries"):
-        sl.complete_source_review(
-            store,
-            task["id"],
-            [check["id"]],
-            [dict(behavior="unknown", conclusion="unknown", check_ids=[check["id"]])],
-            "Unknown",
-            "inconclusive",
-            "Unknown",
-        )
-    task = finish(store, task, ds)
-    assert sl.source_state(store, store.get(lead["id"]))["state"] == "awaiting_review"
-    assert "SOURCE_REVIEW_PENDING" in {i["code"] for i in closure_readiness(store)["issues"]}
-    with pytest.raises(ValueError, match="independent"):
-        sl.review_source_task(store, task["id"], task["id"], "supported", "Self approved")
-    review(store, task)
-    assert closure_readiness(store)["ready"]
-
-
-def test_new_own_events_are_in_result_but_title_change_does_not_requery(lab):
-    store, ds, _ = lab
-    lead, _ = lead_for(store, ds)
-    task = start(store, lead)
-    card = card_for(store, ds, 4, "Additional operation", [lead["id"]], task)
-    task = finish(store, task, ds)
-    review(store, task)
-    assert sl.source_state(store, store.get(lead["id"]))["complete"]
-    e = copy.deepcopy(card["event"])
-    e["title"] = "Readable operation title"
-    events.revise_event(store, card["id"], card["revision"], e, [], "Title only")
-    assert sl.source_state(store, store.get(lead["id"]))["complete"]
-
-
-def test_source_queries_exact_match_and_batch_without_known_paths(lab):
-    store, ds, _ = lab
-    a, _ = lead_for(store, ds)
-    b, _ = lead_for(store, ds, "192.0.2.10", 2)
-    run = sl.source_behavior_overview(store, [a["id"]], [ds["id"]], ["action", "status"], "event_time")
-    assert run["status"] == "succeeded"
-    rows = read_query_result(store, run["id"])["rows"]
-    assert sum(r["record_count"] for r in rows) == 3
-    assert {r["action"] for r in rows} == {"authenticate", "change_setting", "export"}
-    batch = sl.source_behavior_overview(store, [a["id"], b["id"]], [ds["id"]], ["action"])
-    assert sum(r["record_count"] for r in read_query_result(store, batch["id"])["rows"]) == 4
-    truncated = sl.source_behavior_overview(store, [a["id"]], [ds["id"]], ["action"], max_rows=1)
-    assert truncated["truncated"]
-    with pytest.raises(ValueError, match="Fields"):
-        sl.source_behavior_overview(store, [a["id"]], [ds["id"]], ["missing_column"])
-
-
-def test_review_rejection_creates_new_task_and_unknown_sources_do_not_leak(lab):
-    store, ds, _ = lab
-    lead, _ = lead_for(store, ds)
-    task = finish(store, start(store, lead), ds)
-    s = synth(store)
-    sl.review_source_task(
-        store, task["id"], s["id"], "needs_more_evidence", "Inspect unexplained export branch"
-    )
-    nxt = sl.plan_source_review(store, lead["id"], "Export branch")
-    assert nxt["id"] != task["id"]
-    with pytest.raises(ValueError):
-        sl.register_source_lead(store, "not an IP", "client", "exact", [], "Unknown")
-    with pytest.raises(ValueError, match="Unknown source_lead"):
-        event, ref = event_for(ds, 1, lead_ids=["source_lead_foreign"])
-        events.validate(store, event)
-    row = next(o for o in snapshot(store)["objects"] if o["id"] == lead["id"])
-    assert row["investigation"]["state"] == "assigned"
-
-
-def test_native_parallel_workers_cannot_finish_with_one_outstanding(lab):
-    store, ds, _ = lab
-    a, _ = lead_for(store, ds)
-    b, _ = lead_for(store, ds, "192.0.2.10", 2)
-    telemetry.initialize(store)
-    base = checkpoint(store)
-    one = start(store, a)
-    two = start(store, b)
-    for i, t in enumerate([one, two]):
-        telemetry.record(
-            store,
-            "parallel",
-            dict(
-                type="assistant",
-                message=dict(
-                    content=[
-                        dict(
-                            type="tool_use",
-                            id=f"child{i}",
-                            name="Agent",
-                            input=dict(
-                                subagent_type="ir-investigate", prompt=t["id"], run_in_background=False
-                            ),
-                        )
-                    ]
-                ),
-            ),
-        )
-    finish(store, one, ds)
-    telemetry.record(store, "parallel", dict(type="result", is_error=False))
-    result = assess(store, **base)
-    assert result["status"] == "incomplete" and two["id"] in result["unfinished_task_ids"]
-
-
 def content(card, certainty="possible"):
     ref = dict(object_id=card["id"], revision=card["revision"], claim_key="observed")
     return dict(
@@ -477,44 +221,6 @@ def content(card, certainty="possible"):
     )
 
 
-def test_five_chapter_final_requires_current_citations_and_source_closure(lab):
-    store, ds, _ = lab
-    lead, card = lead_for(store, ds)
-    with pytest.raises(ValueError, match="SOURCE_REVIEW_PENDING"):
-        report.render_report(store, "Premature", [], [], report_content=content(card))
-    task = finish(store, start(store, lead), ds)
-    s = synth(store)
-    review(store, task, s)
-    card = store.get(card["id"])
-    integrity.review_delivery(
-        store,
-        s["id"],
-        {c["id"]: "Raw audit and limits checked" for c in store.all("card")},
-        "No cross-environment attribution",
-    )
-    with pytest.raises(ValueError, match="structured report_content"):
-        report.render_report(store, "No structured content", [], [])
-    wrong = content(card)
-    wrong["conclusions"][0]["evidence"][0]["revision"] = 1
-    with pytest.raises(ValueError, match="current"):
-        report.render_report(store, "Wrong version", [], [], report_content=wrong)
-    result = report.render_report(
-        store, "Bounded result", ["Permission baseline missing"], [], report_content=content(card)
-    )
-    text = store.path(result["path"]).read_text()
-    assert [line for line in text.splitlines() if line.startswith("## ")][:5] == [
-        "## 1. 事件背景与调查范围",
-        "## 2. 事件结论与影响评估",
-        "## 3. 攻击时间线与攻击路径",
-        "## 4. 攻击来源与具体行为",
-        "## 5. 证据缺口与处置建议",
-    ]
-    assert result["template_version"] == 1 and result["evidence_labels"][card["id"]] == "E-001"
-    card_for(store, ds, 4, "New source event after report", [lead["id"]])
-    assert store.get(result["id"])["status"] == "stale"
-    assert not closure_readiness(store)["ready"]
-
-
 def test_confirmed_impact_rejects_http_only_evidence(lab):
     from irkit.report_template import validate
 
@@ -528,80 +234,6 @@ def test_confirmed_impact_rejects_http_only_evidence(lab):
     assert validate(store, content(card, "possible"))
 
 
-def test_withdrawal_and_rejected_review_reopen_scope(lab):
-    store, ds, _ = lab
-    lead, card = lead_for(store, ds)
-    task = finish(store, start(store, lead), ds)
-    s = synth(store)
-    review(store, task, s)
-    assert sl.source_state(store, store.get(lead["id"]))["complete"]
-    e = copy.deepcopy(card["event"])
-    e["source_lead_ids"] = []
-    events.revise_event(store, card["id"], card["revision"], e, [], "Corrected attribution: shared exit")
-    assert not sl.source_state(store, store.get(lead["id"]))["complete"]
-    delta = finish(store, start(store, lead), ds)
-    review(store, delta, s)
-    assert sl.source_state(store, store.get(lead["id"]))["complete"]
-    sl.review_source_task(
-        store, delta["id"], s["id"], "needs_more_evidence", "New counterevidence needs inspection"
-    )
-    assert not sl.source_state(store, store.get(lead["id"]))["complete"]
-    assert sl.plan_source_review(store, lead["id"], "Check counterevidence")["id"] != delta["id"]
-
-
-def test_new_partition_reopens_review_and_stale_check_is_not_valid(lab):
-    store, ds, _ = lab
-    lead, _ = lead_for(store, ds)
-    task = finish(store, start(store, lead), ds)
-    review(store, task)
-    clone = {k: v for k, v in ds.items() if k not in ("id", "kind", "revision")}
-    store.put("dataset", clone)
-    state = sl.source_state(store, store.get(lead["id"]))
-    assert not state["complete"]
-    new = sl.plan_source_review(store, lead["id"], "Include new partition")
-    assert len(new["source_snapshot"]["datasets"]) == 2
-    store.update(task["source_result"]["check_ids"][0], {"limitations": "Corrected scope"})
-    assert not sl.result_current(store, store.get(task["id"]))
-
-
-def test_mcp_schema_and_role_tool_boundaries(lab):
-    import asyncio
-
-    from irkit.mcpserver import build_server
-    from irkit.templates import MAIN, ROLE_TOOLS
-
-    store, _, _ = lab
-    schema = {t.name: t.inputSchema for t in asyncio.run(build_server(store.root).list_tools())}
-    assert {
-        "register_source_lead",
-        "source_queue",
-        "plan_source_review",
-        "complete_source_review",
-        "review_source_task",
-    } <= schema.keys()
-    assert "report_content" in schema["render_report"]["properties"]
-    assert "plan_source_review" not in ROLE_TOOLS["ir-investigate"]
-    assert "review_source_task" not in ROLE_TOOLS["ir-investigate"]
-    assert "review_source_task" in ROLE_TOOLS["ir-synthesize"]
-    assert all(not t.startswith("Agent") for tools in ROLE_TOOLS.values() for t in tools)
-    assert "两个不同 task_id" in MAIN
-
-
-def test_obsolete_source_checks_do_not_block_reviewed_replacement(lab):
-    store, ds, _ = lab
-    lead, _ = lead_for(store, ds)
-    old = finish(store, start(store, lead), ds)
-    review(store, old)
-    check_id = old["source_result"]["check_ids"][0]
-    store.update(check_id, {"status": "stale", "stale_because": "synthetic prior interpretation corrected"})
-    assert not closure_readiness(store)["ready"]
-    replacement = finish(store, start(store, lead), ds)
-    review(store, replacement)
-    assert sl.source_state(store, store.get(lead["id"]))["complete"]
-    assert closure_readiness(store)["ready"]
-    assert store.get(check_id)["status"] == "stale"
-
-
 def test_report_timeline_sorts_known_offsets_and_keeps_unknown_last(lab):
     from irkit.report_template import event_order
 
@@ -613,113 +245,239 @@ def test_report_timeline_sorts_known_offsets_and_keeps_unknown_last(lab):
     assert [r["id"] for r in sorted(rows, key=event_order)] == ["b", "a", "c"]
 
 
-def test_forwarded_source_keeps_distinct_trust_and_exact_first_hop(lab):
-    store, ds, _ = lab
-    lead, card = lead_for(store, ds)
-    forwarded = sl.register_source_lead(
-        store, "192.0.2.1", "forwarded", "forwarded_first", [card["id"]], "Unverified forwarded claim"
+def source(check_ids=None, **values):
+    return dict(
+        address="192.0.2.1",
+        field="client",
+        match_mode="exact",
+        attribution="direct_peer",
+        check_ids=check_ids or [],
+        **values,
     )
-    assert forwarded["id"] != lead["id"] and forwarded["attribution"] == "unverified"
-    run = sl.source_behavior_overview(store, [forwarded["id"]], [ds["id"]], ["action"])
-    assert sum(r["record_count"] for r in read_query_result(store, run["id"])["rows"]) == 3
-    with pytest.raises(ValueError, match="same field"):
-        sl.source_behavior_overview(store, [lead["id"], forwarded["id"]], [ds["id"]], ["action"])
 
 
-def test_incremental_review_reuses_baseline_but_requires_new_query(lab):
+def attach(store, card, sources):
+    e = copy.deepcopy(card["event"])
+    e["sources"] = sources
+    return events.revise_event(store, card["id"], card["revision"], e, [], "Source behavior evidence")
+
+
+def test_projection_is_readonly_and_separates_source_trust(lab):
     store, ds, _ = lab
-    lead, _ = lead_for(store, ds)
-    clone = store.put("dataset", {k: v for k, v in ds.items() if k not in ("id", "kind", "revision")})
-    task = start(store, lead)
-    run = query_dataset(
-        store, [ds["id"], clone["id"]], "SELECT _dataset_id,COUNT(*) FROM ir_all_events GROUP BY _dataset_id"
+    card = attach(store, card_for(store, ds), [source()])
+    other = source()
+    other.update(field="forwarded", match_mode="forwarded_first", attribution="unverified")
+    attach(store, card_for(store, ds, 2, "Other event"), [other])
+    before = store.counts()
+    a = sl.source_overview(store, limit=1)
+    b = sl.source_overview(store, limit=1, offset=a["next_offset"])
+    assert a["total"] == 2 and b["next_offset"] is None
+    assert a["sources"][0]["id"] != b["sources"][0]["id"]
+    assert a["sources"][0]["gaps"]
+    assert store.counts() == before and not list(store.all("source_lead"))
+    assert len([o for o in snapshot(store)["objects"] if o["kind"] == "source_view"]) == 2
+    # Target/asset IPs are never inferred to be attackers.
+    store.update(card["id"], {"entities": ["192.0.2.99"]})
+    assert {x["address"] for x in sl.aggregate(store)} == {"192.0.2.1"}
+
+
+def test_check_attachment_keeps_evidence_and_followup_current(lab):
+    store, ds, _ = lab
+    card = attach(store, card_for(store, ds), [source()])
+    follow = board.create_task(
+        store, "ir-investigate", "Find other source operations", "Lab day", [ds["id"]], card["id"]
     )
+    follow = board.update_task(store, follow["id"], follow["revision"], "running")
+    run = query_dataset(store, [ds["id"]], f"SELECT * FROM {ds['id']} WHERE client='192.0.2.1'")
     check = board.submit_check(
         store,
-        "Baseline across both partitions",
+        "Find other source operations",
         [run["id"]],
-        "inconclusive",
-        "Both partitions",
-        "Fixture baseline; not full semantic inspection",
-        task_id=task["id"],
+        "hits",
+        "lab / node-a / 2026-01-01 UTC / client=192.0.2.1; all 3 returned rows",
+        "No permission baseline",
+        task_id=follow["id"],
+        conclusion="Authentication denied, then setting change and export",
     )
-    task = sl.complete_source_review(
-        store,
-        task["id"],
-        [check["id"]],
-        [dict(behavior="baseline", conclusion="No unbounded claims", check_ids=[check["id"]])],
-        "Permission baseline absent",
-        "inconclusive",
-        "Bounded test",
-    )
-    task = board.update_task(
-        store, task["id"], task["revision"], "completed", "Baseline checked", [check["id"]]
-    )
-    review(store, task)
-    card_for(store, ds, 3, "New operation", [lead["id"]])
-    delta = start(store, lead)
-    assert delta["source_base_checks"] == {check["id"]: check["revision"]}
-    # This round queries only the changed partition; the other immutable partition reuses its baseline.
-    delta = finish(store, delta, ds)
-    assert delta["source_result"]["inherited_check_ids"] == [check["id"]]
-    review(store, delta)
-    assert sl.source_state(store, store.get(lead["id"]))["complete"]
-    store.update(check["id"], {"limitations": "Baseline correction"})
-    assert not sl.result_current(store, store.get(delta["id"]))
+    fact = integrity.fact_hash(card)
+    card = attach(store, card, [source([check["id"]])])
+    assert integrity.fact_hash(card) == fact
+    assert store.get(check["id"])["status"] == "candidate"
+    assert not integrity.parent_changed(store.get(follow["id"]), card)
+    row = sl.aggregate(store)[0]
+    assert row["checks"][0]["current"] and row["checks"][0]["query_ids"] == [run["id"]]
+    assert row["checks"][0]["conclusion"].startswith("Authentication denied")
+    report_obj = report.render_report(store, "Progress", [], [], delivery="progress")
+    text = store.path(report_obj["path"]).read_text()
+    assert "Authentication denied" in text and "No permission baseline" in text
+    assert check["id"] in text and card["id"] in text
+    store.update(check["id"], {"status": "stale"})
+    row = sl.aggregate(store)[0]
+    assert not row["checks"][0]["current"] and row["gaps"]
+    # A changed source identity is a changed fact; merely attaching a check wasn't.
+    changed = source()
+    changed["address"] = "192.0.2.2"
+    updated = attach(store, card, [changed])
+    assert integrity.fact_hash(updated) != fact
 
 
-def test_fresh_investigation_has_no_prior_source_judgment(lab):
-    from irkit.cases import fresh_investigation
-
+def test_card_revisions_preserve_or_explicitly_withdraw_source_associations(lab):
     store, ds, _ = lab
-    lead, _ = lead_for(store, ds)
-    fresh = fresh_investigation(store, "Independent analysis")
-    assert not list(fresh.all("source_lead")) and not list(fresh.all("task"))
-    with pytest.raises(ValueError, match="Unknown source_lead"):
-        sl.plan_source_review(fresh, lead["id"], "Forbidden inherited source")
+    card = attach(store, card_for(store, ds), [source()])
+    e = copy.deepcopy(card["event"])
+    del e["sources"]
+    card = events.revise_event(store, card["id"], card["revision"], e, [], "Wording only")
+    assert card["event"]["sources"]
+    attach(store, card, [])
+    assert sl.aggregate(store) == []
+    with store.transaction() as con:
+        history = con.execute("SELECT detail FROM changes WHERE object_id=?", (card["id"],)).fetchall()
+    assert any("192.0.2.1" in h[0] for h in history)
 
 
-def test_source_review_can_cite_existing_hits_without_duplicate_cards(lab):
+def test_legacy_source_records_are_readable_without_blocking_event_work(lab):
     store, ds, _ = lab
-    lead, card = lead_for(store, ds)
-    task = start(store, lead)
-    query = query_dataset(store, [ds["id"]], f"SELECT * FROM {ds['id']} WHERE client='192.0.2.1'")
+    card = card_for(store, ds)
+    lead = store.put(
+        "source_lead",
+        dict(
+            address="192.0.2.1",
+            field="client",
+            match_mode="exact",
+            attribution="unverified",
+            status="candidate",
+        ),
+    )
+    e = copy.deepcopy(card["event"])
+    e["source_lead_ids"] = [lead["id"]]
+    card = events.revise_event(store, card["id"], card["revision"], e, [], "Legacy fixture")
+    task = board.create_task(store, "ir-investigate", "Legacy source pass", "Lab", [ds["id"]])
+    task = store.update(task["id"], {"source_lead_id": lead["id"]})
+    before = store.get(lead["id"])
+    assert closure_readiness(store)["ready"]
+    telemetry.initialize(store)
+    assert task["id"] not in assess(store)["unfinished_task_ids"]
+    row = sl.aggregate(store)[0]
+    assert row["legacy_task_ids"] == [task["id"]] and row["gaps"]
+    assert store.get(lead["id"]) == before
+    # Genuine event follow-up still blocks even if a legacy source marker is present.
+    follow = board.create_task(
+        store, "ir-investigate", "Missing result evidence", "Lab", [ds["id"]], card["id"]
+    )
+    store.update(follow["id"], {"source_lead_id": lead["id"]})
+    assert any(
+        i["code"] == "UNFINISHED_TASK" and i["object_id"] == follow["id"]
+        for i in closure_readiness(store)["issues"]
+    )
+    attach(store, card, [])
+    assert sl.aggregate(store) == []
+
+
+def test_validation_rejects_foreign_checks_and_bad_sources(lab):
+    store, ds, _ = lab
+    e, _ = event_for(ds, 1)
+    for invalid in [
+        source(["check_foreign"]),
+        {**source(), "address": "not-ip"},
+        {**source(), "match_mode": "anything"},
+    ]:
+        with pytest.raises(ValueError):
+            events.validate(store, {**e, "sources": [invalid]})
+    with pytest.raises(ValueError, match="Duplicate"):
+        events.validate(store, {**e, "sources": [source(), source()]})
+
+
+def test_tools_expose_event_sources_without_second_workflow(lab):
+    import asyncio
+
+    from irkit.mcpserver import build_server
+    from irkit.templates import MAIN, ROLE_TOOLS, ROLES
+
+    store, _, _ = lab
+    schema = {t.name: t.inputSchema for t in asyncio.run(build_server(store.root).list_tools())}
+    removed = {
+        "register_source_lead",
+        "source_queue",
+        "plan_source_review",
+        "complete_source_review",
+        "review_source_task",
+        "source_behavior_overview",
+    }
+    assert not removed & schema.keys()
+    assert "source_overview" in schema and "conclusion" in schema["submit_check"]["properties"]
+    assert "EventSource" in schema["submit_event"]["$defs"]
+    for role, names in ROLE_TOOLS.items():
+        assert set(names) <= schema.keys()
+        assert not removed & set(names)
+        assert "event.sources" in ROLES[role]
+    assert "不为每个 IP 固定派任务" in MAIN
+
+
+def test_five_chapter_final_and_current_citations_remain_required(lab):
+    store, ds, _ = lab
+    card = attach(store, card_for(store, ds), [source()])
+    reviewer = synth(store)
+    integrity.review_delivery(
+        store, reviewer["id"], {card["id"]: "Observed audit and limits checked"}, "Scope checked"
+    )
+    result = report.render_report(
+        store, "Bounded result", ["Permission baseline missing"], [], report_content=content(card)
+    )
+    text = store.path(result["path"]).read_text()
+    headings = [line for line in text.splitlines() if line.startswith("## ")][:5]
+    assert [x[3] for x in headings] == list("12345")
+    assert "192.0.2.1" in text and "尚无当前有效的来源行为检查" in text
+    wrong = content(card)
+    wrong["conclusions"][0]["evidence"][0]["revision"] = 0
+    with pytest.raises(ValueError, match="current"):
+        report.render_report(store, "Wrong reference", [], [], report_content=wrong)
+
+
+def test_legacy_check_scope_is_not_assigned_to_later_cards(lab):
+    store, ds, _ = lab
+    lead = store.put(
+        "source_lead",
+        dict(
+            address="192.0.2.1",
+            field="client",
+            match_mode="exact",
+            attribution="unverified",
+            status="candidate",
+        ),
+    )
+    before = card_for(store, ds, lead_ids=[lead["id"]])
+    task = board.create_task(store, "ir-investigate", "Old source inspection", "First event only", [ds["id"]])
+    task = board.update_task(store, task["id"], task["revision"], "running")
     check = board.submit_check(
         store,
-        "Review known behavior",
-        [query["id"]],
-        "hits",
-        "All audit rows",
-        "Previously observed action is present",
-        task_id=task["id"],
-        body_claim="not_required",
-        body_reason="Audit metadata",
-    )
-    result = sl.complete_source_review(
-        store,
-        task["id"],
-        [check["id"]],
-        [
-            {
-                "behavior": "Observed action",
-                "conclusion": "Same evidenced event, no duplicate",
-                "check_ids": [check["id"]],
-            }
-        ],
-        "No identity baseline",
+        "Old behavior question",
+        [],
         "inconclusive",
-        "Existing event independently queried",
-        [card["id"]],
+        "First event only",
+        "No application audit",
+        task_id=task["id"],
     )
-    assert result["source_result"]["finding_card_ids"] == [card["id"]]
-    assert len(list(store.all("card"))) == 1
-    completed = board.update_task(
-        store,
+    store.update(
         task["id"],
-        result["revision"],
-        "completed",
-        "Existing observation checked",
-        list(result["source_result"]["artifact_revisions"]),
+        dict(
+            source_lead_id=lead["id"],
+            source_snapshot={"cards": {before["id"]: "legacy-hash"}},
+            source_result={
+                "behavior_categories": [
+                    {
+                        "behavior": "Authentication",
+                        "conclusion": "Denied; later actions not inspected",
+                        "check_ids": [check["id"]],
+                    }
+                ]
+            },
+            artifact_ids=[check["id"]],
+        ),
     )
-    review(store, completed)
-    assert sl.source_state(store, store.get(lead["id"]))["complete"]
+    later = card_for(store, ds, 2, "Later observation", lead_ids=[lead["id"]])
+    row = sl.aggregate(store)[0]
+    assert len(row["checks"]) == 1
+    assert row["checks"][0]["card_id"] == before["id"]
+    assert row["checks"][0]["historical"] and not row["checks"][0]["current"]
+    assert "Denied; later actions not inspected" in row["checks"][0]["conclusion"]
+    assert any(later["id"] in gap for gap in row["gaps"])

@@ -14,6 +14,14 @@ class EventQuestion(TypedDict):
     check_ids: NotRequired[list[str]]
 
 
+class EventSource(TypedDict):
+    address: str
+    field: str
+    match_mode: Literal["exact", "forwarded_first"]
+    attribution: NotRequired[Literal["direct_peer", "unverified", "trusted_proxy"]]
+    check_ids: NotRequired[list[str]]
+
+
 class EventInput(TypedDict):
     title: str
     environment: str
@@ -25,6 +33,7 @@ class EventInput(TypedDict):
     upstream: EventQuestion
     downstream: EventQuestion
     claims: NotRequired[list[dict]]
+    sources: NotRequired[list[EventSource]]
     source_lead_ids: NotRequired[list[str]]
 
 
@@ -54,7 +63,7 @@ def validate(store, event):
     if (
         not isinstance(event, dict)
         or not required.issubset(event)
-        or set(event) - required - {"claims", "source_lead_ids"}
+        or set(event) - required - {"claims", "source_lead_ids", "sources"}
     ):
         raise ValueError("event fields: " + ", ".join(sorted(required)))
     result = {
@@ -101,6 +110,10 @@ def validate(store, event):
         )
         if any(c["scope"]["environment"] != result["environment"] for c in result["claims"]):
             raise ValueError("Claim environment must match event environment; split cross-environment events")
+    if "sources" in event:
+        from .source_leads import validate_sources
+
+        result["sources"] = validate_sources(store, event["sources"])
     ids = event.get("source_lead_ids", [])
     if not isinstance(ids, list) or len(ids) > 30 or any(not isinstance(i, str) for i in ids):
         raise ValueError("source_lead_ids: up to 30 registered sources")
@@ -246,6 +259,8 @@ def revise_event(
         **event,
         "source_lead_ids": event.get("source_lead_ids", old.get("event", {}).get("source_lead_ids", [])),
     }
+    if "sources" not in event and "sources" in old.get("event", {}):
+        event["sources"] = old["event"]["sources"]
     removed = remove_claims or {}
     prior = {c["key"]: c for c in old.get("event", {}).get("claims", [])}
     if any(k not in prior or not isinstance(v, str) or not v.strip() for k, v in removed.items()):

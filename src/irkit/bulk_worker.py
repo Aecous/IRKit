@@ -1,4 +1,4 @@
-"""Sandboxed, resumable JSONL ingestion with physical-line provenance."""
+"""Local, resumable JSONL ingestion with physical-line provenance."""
 
 import codecs
 import fcntl

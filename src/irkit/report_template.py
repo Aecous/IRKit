@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Literal, NotRequired, TypedDict
 
 from .integrity import pending
-from .source_leads import source_state
+from .source_leads import aggregate, card_sources
 
 
 class Citation(TypedDict):
@@ -183,10 +183,7 @@ def chapters(store, meta, assessment, content, cards, links, checks, datasets, g
         subset = [c for c in live if env_of(c) == env]
         for c in sorted(subset, key=event_order):
             e = c.get("event", {})
-            sources = []
-            for lid in e.get("source_lead_ids", []):
-                lead = store.get(lid, "source_lead")
-                sources.append(lead["address"] + "（" + lead["field"] + "）")
+            sources = [x["address"] + "（" + x["field"] + "）" for x in card_sources(store, c)]
             lines.append(
                 "| "
                 + " | ".join(
@@ -227,42 +224,42 @@ def chapters(store, meta, assessment, content, cards, links, checks, datasets, g
         "来源记录不等于真实攻击者身份；共享出口、代理及转发头可信度需分别验证。",
         "",
     ]
-    for lead in store.all("source_lead"):
-        state = source_state(store, lead)
+    sources = aggregate(store)
+    for source in sources:
         lines += [
-            "### " + clean(lead["address"]),
-            f"- 来源字段：{clean(lead['field'])}；匹配方式：{clean(lead['match_mode'])}；可信度声明：{clean(lead['attribution'])}。",
-            "- 登记依据：" + clean(lead["reason"]),
-            "- 已有复核判断（是否覆盖当前范围见复查状态）："
-            + clean(lead["judgment"])
-            + "；复查状态："
-            + clean(state["state"])
-            + "。",
-            "- 关联事件："
-            + " ".join(cite(cid) for cid, e in lead["cards"].items() if cid in labels and e.get("linked")),
+            "### " + clean(source["address"]),
+            f"- 来源字段：{clean(source['field'])}；匹配方式：{clean(source['match_mode'])}；可信度：{clean(source['attribution'])}",
         ]
-        for tid in state["task_ids"]:
-            task = store.get(tid, "task")
-            result = task.get("source_result", {})
-            lines += ["- 复查任务 `" + tid + "`：" + clean(task["status"]) + "；" + clean(task["scope"])]
-            for b in result.get("behavior_categories", []):
-                lines += [
-                    "  - "
-                    + clean(b["behavior"])
-                    + "："
-                    + clean(b["conclusion"])
-                    + " "
-                    + " ".join(cite(cid) for cid in b["check_ids"] if cid in labels)
-                ]
-            if result:
-                lines += [
-                    "  - 缺口："
-                    + clean(result["limitations"])
-                    + "；综合复核："
-                    + clean(task.get("source_review", {}).get("verdict", "未复核"))
-                ]
-    if not list(store.all("source_lead")):
-        lines += ["未登记来源线索；不代表不存在攻击来源。"]
+        for card in source["cards"]:
+            lines += [
+                "- 事件："
+                + cite(card["id"])
+                + "；"
+                + clean(card["environment"])
+                + " / "
+                + clean(card["asset"])
+                + "；"
+                + clean(card["time_range"])
+                + ("" if card["current"] else "（历史/待复核，不作为当前事实）")
+            ]
+        for check in source["checks"]:
+            lines += [
+                "- 检查："
+                + cite(check["id"])
+                + "；"
+                + clean(check["question"])
+                + ("" if check["current"] else "（历史/过期/待复核）"),
+                "  - 已查范围：" + clean(check["scope"]),
+                "  - 结果："
+                + clean(check["outcome"])
+                + "；结论："
+                + clean(check.get("conclusion") or "未单独记录，见检查和事件卡")
+                + "；限制："
+                + clean(check["limitations"]),
+            ]
+        lines += ["- 缺口：" + clean(gap) for gap in source["gaps"]]
+    if not sources:
+        lines += ["事件卡尚未关联来源；不代表不存在攻击来源。"]
     lines += [
         "",
         "## 5. 证据缺口与处置建议",

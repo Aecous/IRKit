@@ -224,7 +224,10 @@ def submit_check(
     body_claim="uninspected",
     body_run_ids=None,
     body_reason="",
+    conclusion="",
 ):
+    if not isinstance(conclusion, str) or len(conclusion) > 4000:
+        raise ValueError("conclusion: text <=4000 characters")
     if outcome not in ("hits", "zero_hits", "incomplete", "inconclusive"):
         raise ValueError("Unknown check outcome")
     if not question.strip() or not scope.strip() or not limitations.strip():
@@ -290,6 +293,7 @@ def submit_check(
                 for r in decode_runs
             ],
             "outcome": outcome,
+            "conclusion": conclusion,
             "scope": scope,
             "limitations": limitations,
             **({"task_id": task_id} if task_id else {}),
@@ -589,9 +593,9 @@ def case_context(store):
         "tasks": [
             brief(task, ("role", "question", "status", "summary", "artifact_ids", "parent_card_id"))
             for task in store.list("task", 30)
+            if not (task.get("source_lead_id") and not task.get("parent_card_id"))
         ],
-        "source_leads": store.list("source_lead", 20),
-        "page_note": "Use list_objects/source_queue for all pages",
+        "page_note": "Use list_objects for all pages; source_overview derives sources from event cards",
         "card_status_counts": {
             s: sum(c["status"] == s for c in store.all("card"))
             for s in ("candidate", "reviewed", "rejected", "stale")

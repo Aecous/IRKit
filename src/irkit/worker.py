@@ -1,4 +1,4 @@
-"""Trusted child entrypoint. Model code runs only inside the OS sandbox."""
+"""Python transformation and SQL entrypoint executed as a local subprocess."""
 
 from __future__ import annotations
 
@@ -31,14 +31,13 @@ def transform(config):
             if any(key.startswith("_") for key in fields):
                 raise ValueError("Underscore-prefixed fields are reserved")
             emitted += 1
-            if emitted > 1_000_000:
-                raise ValueError("Run output exceeds one million rows; partition the task")
             stream.write(dumps({**fields, "_refs": refs, "_row_id": emitted}) + "\n")
 
         namespace = {
             "records": records,
             "emit": emit,
             "SOURCE_IDS": list(config["sources"]),
+            "SOURCE_PATHS": {sid: Path(source["path"]) for sid, source in config["sources"].items()},
             "__name__": "__main__",
         }
         exec(compile(Path("transform.py").read_text(), "transform.py", "exec"), namespace)
@@ -49,12 +48,11 @@ def query(config):
     import duckdb
 
     con = duckdb.connect(
+        "analysis.duckdb",
         config={
             "threads": "2",
             "memory_limit": "1024MB",
             "max_temp_directory_size": "8GB",
-            "autoinstall_known_extensions": "false",
-            "autoload_known_extensions": "false",
         }
     )
     for dataset_id, path in config["datasets"].items():
@@ -75,12 +73,12 @@ def query(config):
             f"SELECT *, '{did}' AS _dataset_id FROM {did}" for did in config["datasets"]
         )
         con.execute("CREATE VIEW ir_all_events AS " + union)
-    con.execute("SET enable_external_access=false")
-    con.execute("SET lock_configuration=true")
     statements = con.extract_statements(config["sql"])
-    if len(statements) != 1 or statements[0].type != duckdb.StatementType.SELECT:
-        raise ValueError("Exactly one SELECT statement is allowed")
-    cursor = con.execute(config["sql"])
+    if not statements:
+        raise ValueError("SQL must contain at least one statement")
+    for statement in statements:
+        cursor = con.execute(statement)
+    # Persist the final statement result; the full SQL and scratch database remain in this run.
     original_names = [column[0] for column in cursor.description]
     names, occupied = [], set()
     for name in original_names:
@@ -112,6 +110,7 @@ def query(config):
         dumps(
             {
                 "saved_rows": saved,
+                "statement_count": len(statements),
                 "truncated": truncated,
                 "columns": names,
                 "preview": preview,
