@@ -204,6 +204,13 @@ def drive(store, run_id):
                     "query_examples": [f"SELECT parse_status, count(*) FROM {did} GROUP BY 1"],
                     "row_count": meta["rows"],
                     "sources": [sid],
+                    "raw_coverage": [
+                        {
+                            "source_id": sid,
+                            "records": source["record_count_lf"],
+                            "ranges": [[1, meta["rows"]]] if meta["rows"] else [],
+                        }
+                    ],
                     "source_record_counts": [
                         {"source_id": sid, "encoding": "utf-8", "records": meta["rows"]}
                     ],

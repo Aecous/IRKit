@@ -1,5 +1,6 @@
 """Format-independent event cards and a derived investigation queue. No model scheduling."""
 
+from datetime import datetime
 from typing import Literal, NotRequired, TypedDict
 
 from .integrity import parent_changed
@@ -22,6 +23,13 @@ class EventSource(TypedDict):
     check_ids: NotRequired[list[str]]
 
 
+class EventTime(TypedDict):
+    basis: Literal["recorded_offset", "inferred_offset", "unknown"]
+    start: NotRequired[str]
+    end: NotRequired[str]
+    note: NotRequired[str]
+
+
 class EventInput(TypedDict):
     title: str
     environment: str
@@ -34,6 +42,8 @@ class EventInput(TypedDict):
     downstream: EventQuestion
     claims: NotRequired[list[dict]]
     sources: NotRequired[list[EventSource]]
+    timeline: NotRequired[EventTime]
+    source_limitation: NotRequired[str]
     source_lead_ids: NotRequired[list[str]]
 
 
@@ -63,7 +73,7 @@ def validate(store, event):
     if (
         not isinstance(event, dict)
         or not required.issubset(event)
-        or set(event) - required - {"claims", "source_lead_ids", "sources"}
+        or set(event) - required - {"claims", "source_lead_ids", "sources", "source_limitation", "timeline"}
     ):
         raise ValueError("event fields: " + ", ".join(sorted(required)))
     result = {
@@ -114,6 +124,10 @@ def validate(store, event):
         from .source_leads import validate_sources
 
         result["sources"] = validate_sources(store, event["sources"])
+    if event.get("source_limitation"):
+        result["source_limitation"] = text(event["source_limitation"], "source_limitation", 1000)
+    if "timeline" in event:
+        result["timeline"] = validate_time(event["timeline"])
     ids = event.get("source_lead_ids", [])
     if not isinstance(ids, list) or len(ids) > 30 or any(not isinstance(i, str) for i in ids):
         raise ValueError("source_lead_ids: up to 30 registered sources")
@@ -122,6 +136,31 @@ def validate(store, event):
     if ids:
         result["source_lead_ids"] = list(dict.fromkeys(ids))
     return result
+
+
+def timestamp(value):
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("Event timestamps require an explicit UTC offset")
+    return parsed
+
+
+def validate_time(value):
+    if not isinstance(value, dict) or set(value) - {"start", "end", "basis", "note"}:
+        raise ValueError("timeline: start, end, basis and note")
+    basis = value.get("basis")
+    if basis not in {"recorded_offset", "inferred_offset", "unknown"}:
+        raise ValueError("timeline.basis: recorded_offset, inferred_offset, or unknown")
+    note = text(value.get("note", ""), "timeline.note", 600, empty=basis == "recorded_offset")
+    if basis == "unknown":
+        if value.get("start") or value.get("end"):
+            raise ValueError("Leave structured timestamps empty when the offset/time is unknown")
+        return dict(basis=basis, note=note)
+    start = text(value.get("start", ""), "timeline.start", 45)
+    end = text(value.get("end", start), "timeline.end", 45)
+    if timestamp(end) < timestamp(start):
+        raise ValueError("timeline.end precedes start")
+    return dict(start=start, end=end, basis=basis, note=note)
 
 
 def dependencies(event):
@@ -259,8 +298,9 @@ def revise_event(
         **event,
         "source_lead_ids": event.get("source_lead_ids", old.get("event", {}).get("source_lead_ids", [])),
     }
-    if "sources" not in event and "sources" in old.get("event", {}):
-        event["sources"] = old["event"]["sources"]
+    for field in ("sources", "source_limitation", "timeline"):
+        if field not in event and field in old.get("event", {}):
+            event[field] = old["event"][field]
     removed = remove_claims or {}
     prior = {c["key"]: c for c in old.get("event", {}).get("claims", [])}
     if any(k not in prior or not isinstance(v, str) or not v.strip() for k, v in removed.items()):

@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 
 from .evidence import case_metadata
+from .input_coverage import input_coverage
 from .integrity import delivery_snapshot, parent_changed, pending
 from .store import dumps, now, uid
 
@@ -105,10 +106,25 @@ def _render_report(store, assessment, gaps, next_questions, delivery, report_con
                 raise ValueError(
                     "DELIVERY_UNREVIEWED: review_delivery must cover current cards and links before final report"
                 )
-    from .report_template import chapters, validate
+    from .report_template import chapters, relation_display, validate
 
     if report_content is not None:
         report_content = validate(store, report_content)
+        if delivery == "final" and any(t.get("event_policy_version", 0) >= 4 for t in store.all("task")):
+            from .source_profile import source_issues
+
+            cited_cards = {}
+            for section in ("conclusions", "impacts"):
+                for finding in report_content[section]:
+                    for ref in finding["evidence"]:
+                        item = store.get(ref["object_id"])
+                        if item["kind"] == "card":
+                            cited_cards[item["id"]] = item
+                        elif item["kind"] == "link":
+                            for cid in (item["from_card"], item["to_card"]):
+                                cited_cards[cid] = store.get(cid, "card")
+            if issues := source_issues(store, cited_cards.values()):
+                raise ValueError(dumps(issues))
     if (
         delivery == "final"
         and any(t.get("event_policy_version", 0) >= 3 for t in store.all("task"))
@@ -121,6 +137,8 @@ def _render_report(store, assessment, gaps, next_questions, delivery, report_con
     cards, links, checks = list(store.all("card")), list(store.all("link")), list(store.all("check"))
     datasets = list(store.all("dataset"))
     sources = list(store.all("source"))
+    coverage = input_coverage(store, sources, datasets)
+    input_gaps = [row["gap"] for row in coverage if row["gap"]]
     tasks = {task["id"]: task for task in store.all("task")}
     followups = [task for task in tasks.values() if task.get("parent_card_id")]
     from .board import current_followup_review
@@ -154,7 +172,17 @@ def _render_report(store, assessment, gaps, next_questions, delivery, report_con
         "",
     ]
     structured, evidence_labels = chapters(
-        store, meta, assessment, report_content, cards, links, checks, datasets, gaps, next_questions
+        store,
+        meta,
+        assessment,
+        report_content,
+        cards,
+        links,
+        checks,
+        datasets,
+        gaps,
+        next_questions,
+        coverage,
     )
     lines += structured + ["", "### 逐项证据与统计口径（工具生成）", ""]
     for card in cards:
@@ -177,12 +205,34 @@ def _render_report(store, assessment, gaps, next_questions, delivery, report_con
     if readiness["issues"]:
         lines += ["", "### 未完成事项（工具检查）", ""]
         lines += [f"- {safe(dumps(issue))}" for issue in readiness["issues"]]
-    dataset_sources = {sid for ds in datasets if ds["status"] != "superseded" for sid in ds["sources"]}
-    for source in sources:
+    counts = {
+        state: sum(row["state"] == state for row in coverage)
+        for state in ("complete", "duplicate", "partial", "not_processed", "unverified")
+    }
+    lines.append(
+        f"- 已登记 {len(coverage)} 份；原文引用全覆盖 {counts['complete']}；哈希重复 {counts['duplicate']}；"
+        f"部分 {counts['partial']}；未处理 {counts['not_processed']}；覆盖未核验 {counts['unverified']}。"
+        "原文引用范围只衡量记录覆盖，字段解析质量另见数据集说明。"
+    )
+    labels = dict(
+        complete="已入库（原文引用范围完整）",
+        duplicate="已验证重复",
+        partial="部分入库",
+        not_processed="尚未数据化（未处理）",
+        unverified="已发布，原文覆盖未核验",
+    )
+    for source, row in zip(sources, coverage):
         lines.append(
             f"- `{source['id']}` {safe(source['original_path'])}；{source['size']} 字节；"
             f"{source['record_kind']}；SHA256 `{source['sha256']}`；"
-            f"{'已参与数据化（不表示全部覆盖）' if source['id'] in dataset_sources else '尚未数据化'}"
+            f"{labels[row['state']]}；引用的记录 {row['referenced_records'] if row['referenced_records'] is not None else '未知'} / "
+            f"{row['records'] if row['records'] is not None else '未知'}；分区 {safe(', '.join(row['dataset_ids']) or '无')}"
+            + (f"；与 `{row['duplicate_of']}` 哈希相同" if row["duplicate_of"] else "")
+            + (
+                f"；覆盖缺口：{safe(row['gap']['reason'])}；依据 {safe(', '.join(row['gap']['attempt_ids']))}"
+                if row["gap"] and row["state"] not in {"complete", "duplicate"}
+                else ""
+            )
         )
     for ds in datasets:
         lines.append(f"- 数据集 `{ds['id']}`：{ds['row_count']} 行；{ds['status']}；{safe(ds['quality'])}")
@@ -229,12 +279,13 @@ def _render_report(store, assessment, gaps, next_questions, delivery, report_con
             or any(link[k] not in active for k in ("from_card", "to_card"))
         ):
             continue
-        arrow = "-.->" if link["inferred"] else "-->"
-        lines.append(f"    {link['from_card']} {arrow} {link['to_card']}")
-    lines += ["```", "", "虚线表示推断关系，实线表示提交为直接观察的关系；所有关系仍需人工复核。", ""]
+        arrow, label = relation_display(link)
+        arrow = ("-.->" if link["inferred"] else "-->") if arrow == "→" else "---"
+        lines.append(f"    {link['from_card']} {arrow}|{label}| {link['to_card']}")
+    lines += ["```", "", "箭头只用于时序及因果方向。正文与下方记录标注每条关系的证据层级。", ""]
     for link in links:
         lines.append(
-            f"- `{link['id']}` {link['from_card']} → {link['to_card']}：{safe(link['relation'])}；"
+            f"- `{link['id']}` {link['from_card']} {relation_display(link)[0]} {link['to_card']}：{safe(link['relation'])}；"
             f"{link['status']}；证据 {safe(dumps(link['evidence']))}"
         )
     lines += ["", "### 排查范围", ""]
@@ -278,10 +329,10 @@ def _render_report(store, assessment, gaps, next_questions, delivery, report_con
             "created": now(),
             "snapshot": [
                 {"id": o["id"], "revision": o["revision"]}
-                for o in cards + links + checks + datasets + followups
+                for o in cards + links + checks + datasets + followups + input_gaps
             ],
         },
         object_id=rid,
         con=con,
-        dependencies=[o["id"] for o in cards + links + checks + datasets + followups],
+        dependencies=[o["id"] for o in cards + links + checks + datasets + followups + input_gaps],
     )

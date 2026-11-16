@@ -190,12 +190,21 @@ def review_card(store, card_id, expected_revision, decision, note):
     )
 
 
-def submit_link(store, from_card, to_card, relation, evidence, inferred=True):
+def submit_link(store, from_card, to_card, relation, evidence, inferred=True, relation_type="association"):
     if from_card == to_card or not relation.strip():
         raise ValueError("Choose distinct cards and explain the relationship")
-    for cid in (from_card, to_card):
-        if store.get(cid, "card")["status"] in ("stale", "rejected"):
+    if relation_type not in {"sequence", "same_session", "causal", "association"}:
+        raise ValueError("Use sequence, same_session, causal, or association")
+    cards = [store.get(cid, "card") for cid in (from_card, to_card)]
+    for card in cards:
+        if card["status"] in ("stale", "rejected", "superseded"):
             raise ValueError("Cannot link stale/rejected cards")
+    if relation_type in {"sequence", "causal"}:
+        from .events import timestamp
+
+        first, last = [card.get("event", {}).get("timeline", {}) for card in cards]
+        if first.get("start") and last.get("end") and timestamp(first["start"]) > timestamp(last["end"]):
+            raise ValueError("Directed link reverses the nonoverlapping event times")
     dependencies = validate_refs(store, evidence)
     return store.put(
         "link",
@@ -203,6 +212,7 @@ def submit_link(store, from_card, to_card, relation, evidence, inferred=True):
             "from_card": from_card,
             "to_card": to_card,
             "relation": relation,
+            "relation_type": relation_type,
             "evidence": evidence,
             "inferred": inferred,
             "status": "candidate",
@@ -277,6 +287,11 @@ def submit_check(
         {
             "question": question,
             "query_ids": query_ids,
+            "source_operation_profiles": [
+                {"query_id": run["id"], **run["source_profile"]}
+                for run in runs
+                if run["status"] == "succeeded" and run.get("source_profile")
+            ],
             "decode_run_ids": decode_run_ids or [],
             "body_claim": body_claim,
             "body_reason": body_reason,

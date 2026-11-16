@@ -110,6 +110,7 @@ def initialize_case(source_dir, cases_dir, background=""):
         "input_directory": str(source_dir),
         "background": background,
         "background_status": "user_provided_unverified",
+        "event_policy_version": 4,
         "status": "ingesting",
         "skipped": [],
         "errors": [],

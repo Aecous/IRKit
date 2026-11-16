@@ -1,9 +1,10 @@
 """Five fixed chapters with validated citations; semantics remain independently reviewed."""
 
 import html
-from datetime import datetime
+import re
 from typing import Literal, NotRequired, TypedDict
 
+from .events import timestamp
 from .integrity import pending
 from .source_leads import aggregate, card_sources
 
@@ -95,17 +96,48 @@ def validate(store, content):
 
 
 def event_order(card):
-    value = card.get("time_range", "unknown")
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        if parsed.tzinfo is not None:
-            return (0, parsed.timestamp(), card["id"])
-    except ValueError:
-        pass
+    timeline = card.get("event", {}).get("timeline")
+    stamp = timeline.get("start") if timeline is not None else None
+    if timeline is None:  # Legacy range strings only sort if the leading timestamp has an offset.
+        match = re.match(
+            r"^\s*(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2}))",
+            card.get("time_range", ""),
+        )
+        stamp = match[1] if match else None
+    if stamp:
+        try:
+            return (0, timestamp(stamp).timestamp(), card["id"])
+        except ValueError:
+            pass
     return (1, 0, card["id"])
 
 
-def chapters(store, meta, assessment, content, cards, links, checks, datasets, gaps, questions):
+def display_time(card):
+    original = card.get("time_range", "unknown")
+    timeline = card.get("event", {}).get("timeline", {})
+    if not timeline:
+        return original
+    basis = {"recorded_offset": "原始偏移", "inferred_offset": "推定偏移", "unknown": "时间或时区未知"}[
+        timeline["basis"]
+    ]
+    normalized = timeline.get("start", "")
+    if normalized and timeline["end"] != normalized:
+        normalized += " 至 " + timeline["end"]
+    detail = " · ".join(filter(None, (normalized, basis, timeline.get("note"))))
+    return original + "（" + detail + "）"
+
+
+def relation_display(link):
+    kind = link.get("relation_type", "association")
+    return {
+        "sequence": ("→", "时序"),
+        "causal": ("→", "因果"),
+        "same_session": ("↔", "同会话"),
+        "association": ("↔", "线索关联"),
+    }[kind]
+
+
+def chapters(store, meta, assessment, content, cards, links, checks, datasets, gaps, questions, coverage=()):
     from .integrity import environment_names
 
     names = environment_names(store)
@@ -143,6 +175,9 @@ def chapters(store, meta, assessment, content, cards, links, checks, datasets, g
         clean(content["scope_note"]) if content else "范围以本调查登记的日志、已发布分区与下方证据附录为准。",
         "",
         f"当前可用数据集：{sum(d['status'] not in ('stale', 'rejected', 'superseded') for d in datasets)} 个。各分区行数与质量分别列于附录；不自动相加为唯一事件数量。",
+        f"输入清单登记 {len(coverage)} 份。原文引用全覆盖或哈希重复 "
+        f"{sum(row['state'] in {'complete', 'duplicate'} for row in coverage)} 份，"
+        "逐文件覆盖及缺口见附录「数据范围与质量」。",
         "时间沿用证据记录的时区与精度；无时区或缺失时间不得推定为 UTC。最早可见活动不等于真实攻击起点。",
         "",
         "## 2. 事件结论与影响评估",
@@ -188,7 +223,7 @@ def chapters(store, meta, assessment, content, cards, links, checks, datasets, g
                 "| "
                 + " | ".join(
                     [
-                        clean(c.get("time_range", "unknown")),
+                        clean(display_time(c)),
                         clean("、".join(sources) or "未关联/未知"),
                         clean(e.get("asset", "unknown")),
                         clean(e.get("observed", c["statement"])),
@@ -205,12 +240,13 @@ def chapters(store, meta, assessment, content, cards, links, checks, datasets, g
             continue
         if not all(cid in {c["id"] for c in live} for cid in (link["from_card"], link["to_card"])):
             continue
+        arrow, label = relation_display(link)
         lines += [
             "- "
             + cite(link["from_card"])
-            + " → "
+            + f" {arrow} "
             + cite(link["to_card"])
-            + "："
+            + f"（{label}）："
             + clean(link["relation"])
             + "；"
             + ("推断关系" if link["inferred"] else "提交为直接观察的关系")
@@ -257,6 +293,18 @@ def chapters(store, meta, assessment, content, cards, links, checks, datasets, g
                 + "；限制："
                 + clean(check["limitations"]),
             ]
+            for profile in check.get("source_operation_profiles") or []:
+                lines.append(
+                    "  - 来源基线："
+                    + clean(profile["dataset_id"])
+                    + " / "
+                    + clean(profile["field"])
+                    + f"，匹配 {profile['matched_rows']} 条，保存 {profile['saved_groups']}/{profile['total_groups']} 组"
+                    + "，按 "
+                    + clean(", ".join(profile["operation_fields"]))
+                    + " 分组。"
+                    + "保存范围与实际复核范围分别记录。"
+                )
         lines += ["- 缺口：" + clean(gap) for gap in source["gaps"]]
     if not sources:
         lines += ["事件卡尚未关联来源；不代表不存在攻击来源。"]

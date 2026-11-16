@@ -462,11 +462,10 @@ def delivery_issues(store):
 
 
 def delivery_snapshot(store):
-    return {
-        o["id"]: o["revision"]
-        for kind in ("card", "link", "check", "environment_alias")
-        for o in store.all(kind)
-    }
+    kinds = ("card", "link", "check", "environment_alias")
+    if any(t.get("event_policy_version", 0) >= 4 for t in store.all("task")):
+        kinds += ("source", "dataset", "input_gap")
+    return {o["id"]: o["revision"] for kind in kinds for o in store.all(kind)}
 
 
 def review_delivery(store, synthesis_task_id, decisions, note):

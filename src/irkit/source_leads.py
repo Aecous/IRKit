@@ -153,7 +153,7 @@ def aggregate(store):
                     row["gaps"].append(f"{card['id']}: check {cid} unavailable")
                     continue
                 legacy = cid not in ids
-                usable = current and check["status"] not in INVALID and not legacy
+                usable = current and check["status"] not in INVALID and not pending(check) and not legacy
                 valid |= usable
                 row["checks"].append(
                     {
@@ -169,6 +169,7 @@ def aggregate(store):
                                 "conclusion",
                                 "limitations",
                                 "query_ids",
+                                "source_operation_profiles",
                                 "task_id",
                             )
                         },

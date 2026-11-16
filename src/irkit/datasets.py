@@ -3,12 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
+from collections import defaultdict
 from pathlib import Path
 
 import duckdb
 
 from .evidence import raw_ref
 from .execution import run_process
+from .input_coverage import add_range
 from .store import dumps, now, uid
 
 
@@ -77,16 +79,13 @@ def publish_dataset(store, run_id, description, field_notes, quality, query_exam
     if not description.strip() or not field_notes or not quality.strip():
         raise ValueError("Description, field notes, and honest quality notes are required")
     output = store.path(f"{run['path']}/rows.jsonl")
-    if (
-        output.is_symlink()
-        or not output.is_file()
-        or output.stat().st_nlink != 1
-    ):
+    if output.is_symlink() or not output.is_file() or output.stat().st_nlink != 1:
         raise ValueError("Invalid transform output file")
     did = uid("ds")
     directory = store.root / "datasets" / did
     directory.mkdir()
     counts, fields, row_count = {}, set(), 0
+    ranges, overflow = defaultdict(list), set()
     try:
         with output.open() as source, (directory / "rows.jsonl").open("w") as target:
             for line in source:
@@ -99,6 +98,11 @@ def publish_dataset(store, run_id, description, field_notes, quality, query_exam
                     if ref.get("source_id") not in run["sources"]:
                         raise ValueError("Reference is outside approved run sources")
                     raw_ref(store, ref, counts=counts)
+                    key = (ref["source_id"], ref.get("encoding", "utf-8"))
+                    if key not in overflow:
+                        add_range(ranges[key], ref["start"], ref["end"])
+                        if len(ranges[key]) > 2048:
+                            overflow.add(key)
                 row_count += 1
                 if any(key.startswith("_") and key not in ("_row_id", "_refs") for key in row):
                     raise ValueError("Reserved field name")
@@ -135,6 +139,20 @@ def publish_dataset(store, run_id, description, field_notes, quality, query_exam
                 "query_examples": query_examples,
                 "row_count": row_count,
                 "sources": run["sources"],
+                "raw_coverage": [
+                    {
+                        "source_id": sid,
+                        "records": counts[sid, encoding],
+                        "ranges": spans,
+                        "overflow": (sid, encoding) in overflow,
+                    }
+                    for (sid, encoding), spans in ranges.items()
+                ]
+                + [
+                    {"source_id": sid, "records": None, "ranges": []}
+                    for sid in run["sources"]
+                    if all(sid != key[0] for key in ranges)
+                ],
                 "source_record_counts": [
                     {"source_id": k[0], "encoding": k[1], "records": v} for k, v in counts.items()
                 ],
@@ -150,8 +168,8 @@ def publish_dataset(store, run_id, description, field_notes, quality, query_exam
         raise
 
 
-def query_dataset(store, dataset_ids, sql, max_rows=1000, timeout=0):
-    if not dataset_ids or not 1 <= max_rows <= 10000 or len(sql) > 40000:
+def query_dataset(store, dataset_ids, sql, max_rows=1000, timeout=0, *, source_profile=None):
+    if not dataset_ids or not 1 <= max_rows <= (100000 if source_profile else 10000) or len(sql) > 40000:
         raise ValueError("Choose datasets, max_rows 1..10000, SQL <= 40000 chars")
     datasets = {did: store.get(did, "dataset") for did in dataset_ids}
     rid = uid("run")
@@ -176,6 +194,7 @@ def query_dataset(store, dataset_ids, sql, max_rows=1000, timeout=0):
             "sql": sql,
             "path": f"runs/{rid}",
             "scratch_database": f"runs/{rid}/analysis.duckdb",
+            **({"source_profile": source_profile} if source_profile else {}),
         },
         object_id=rid,
         dependencies=dataset_ids,
@@ -188,6 +207,15 @@ def query_dataset(store, dataset_ids, sql, max_rows=1000, timeout=0):
         )
         if outcome["status"] == "succeeded":
             outcome.update(json.loads((directory / "result_meta.json").read_text()))
+            if source_profile:
+                first = outcome["preview"][0] if outcome["preview"] else {}
+                outcome["source_profile"] = {
+                    **source_profile,
+                    "matched_rows": first.get("matched_rows", 0),
+                    "total_groups": first.get("total_groups", 0),
+                    "saved_groups": outcome["saved_rows"],
+                    "all_groups_saved": not outcome["truncated"],
+                }
     except Exception as exc:
         outcome = {"status": "failed", "error": str(exc)}
     result = store.update(rid, {**outcome, "finished": now()})

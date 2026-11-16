@@ -133,6 +133,20 @@ def task_readiness(store, task_id, artifact_ids=None):
 def closure_readiness(store):
     """Check case-wide work, including tasks omitted from synthesis inputs."""
     issues = delivery_issues(store)
+    if any(task.get("event_policy_version", 0) >= 4 for task in store.all("task")):
+        from .input_coverage import input_coverage
+
+        for source in input_coverage(store):
+            if source["state"] not in {"complete", "duplicate"} and not source["gap"]:
+                issues.append(
+                    dict(
+                        code="INPUT_COVERAGE_PENDING",
+                        object_id=source["source_id"],
+                        state=source["state"],
+                        path=source["path"],
+                        action="Process remaining input or record an evidence-backed limitation",
+                    )
+                )
     from .events import event_queue
 
     offset = 0

@@ -44,6 +44,8 @@ def fresh_investigation(original, background, destination=None, dataset_ids=None
             parent_case=original.root.name,
             pinned_dataset_ids=[d["id"] for d in datasets],
             analysis_policy="fresh_event_investigation",
+            # The user explicitly selects frozen partitions; this is not a new full-input intake.
+            event_policy_version=3,
         )
         (root / "case.json").write_text(json.dumps(meta, ensure_ascii=False))
         Store.initialize(root)
