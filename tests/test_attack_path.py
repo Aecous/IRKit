@@ -4,7 +4,7 @@ import pytest
 
 from irkit import board, events
 from irkit.integrity import fact_hash
-from irkit.report_template import build_chains, attack_path_section
+from irkit.report_template import attack_path_section, build_chains
 
 
 def event(title, stage=None):
