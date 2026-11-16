@@ -40,7 +40,7 @@ def test_event_question_requires_dispatch_and_independent_review(case, dataset):
     with pytest.raises(ValueError, match="submit_event"):
         board.submit_card(case, "Old free-text card", "observation", [ref], task_id=task["id"])
     card = events.submit_event(case, event(), [ref], "2026-01-01 UTC", task["id"])
-    with pytest.raises(ValueError, match="Existing event"):
+    with pytest.raises(ValueError, match="疑似重复事件"):
         events.submit_event(case, event(), [ref], "2026-01-01 UTC", task["id"])
     board.update_task(case, task["id"], task["revision"], "completed", "Change observed", [card["id"]])
     queue = events.event_queue(case)

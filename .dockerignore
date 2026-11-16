@@ -1,0 +1,5 @@
+.git
+.venv
+cases
+web-cases
+*.sqlite

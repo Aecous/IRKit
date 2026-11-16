@@ -1,10 +1,40 @@
 """Format-independent event cards and a derived investigation queue. No model scheduling."""
 
+import re
 from datetime import datetime
 from typing import Literal, NotRequired, TypedDict
 
 from .integrity import parent_changed
 from .store import dumps
+
+# Placeholder/test cards the model emits while probing tools; they waste card slots and
+# inflate the synthesis review load. Only English titles made entirely of placeholder
+# words, or short Chinese titles containing a placeholder phrase, count — and only when
+# the observed field is also non-substantive, so real findings are never rejected.
+_PLACEHOLDER_WORDS = {
+    "test", "testing", "diagnostic", "diagnostics", "diag", "temporary", "temp", "probe",
+    "demo", "placeholder", "dummy", "sample", "example", "debug", "validation", "event",
+    "events", "card", "node", "only", "check", "smoke",
+}
+_PLACEHOLDER_CJK = re.compile(r"(测试|占位|样例|调试|演示|临时|探针)")
+
+
+def is_placeholder_title(title):
+    t = title.strip().lower()
+    if not t or len(t) > 40:
+        return False
+    if re.search(r"[一-鿿]", t):
+        return bool(_PLACEHOLDER_CJK.search(t)) and len(re.sub(r"\s", "", t)) <= 8
+    words = re.findall(r"[a-z]+", t)
+    return bool(words) and all(w in _PLACEHOLDER_WORDS for w in words)
+
+
+def normalized_title(title):
+    """Keep only letters and CJK ideographs, so digit/punctuation/spacing rewordings match.
+    This is a safety net for lightly-reworded resubmissions; semantically reworded titles
+    (inserted words) are instead prevented at source by the search-before-create prompt rule."""
+    return re.sub(r"[^a-z一-鿿]", "", title.lower())
+
 
 
 class EventQuestion(TypedDict):
@@ -99,6 +129,10 @@ def validate(store, event):
         k: text(event[k], k, 160 if k == "title" else 300 if k in {"environment", "asset"} else 1800)
         for k in ("title", "environment", "asset", "observed")
     }
+    if len(result["observed"].strip()) < 24 and is_placeholder_title(result["title"]):
+        raise ValueError(
+            "疑似占位/测试卡：请用真实事件标题，并在 observed 写明具体行为（时间/来源/对象/结果）"
+        )
     for key in ("possible_causes", "observed_effects", "potential_impacts"):
         if not isinstance(event[key], list) or len(event[key]) > 4:
             raise ValueError(f"{key}: use up to four concise statements; unknown may be []")
@@ -305,18 +339,29 @@ def submit_event(
     from .board import submit_card
 
     event = validate(store, event)
-    # Prevent exact duplicate event nodes without pretending semantic similarity is identity.
+    # Prevent duplicate event nodes without pretending semantic similarity is identity.
+    # Exact match on (title, environment, asset, time_range); plus a normalized-title match
+    # within the same environment, which catches the same node re-submitted with lightly
+    # reworded or re-counted titles (e.g. "44,904 个 404" vs "44904 404 侦察").
+    norm = normalized_title(event["title"])
     for card in store.all("card"):
+        if card["status"] in INVALID:
+            continue
         previous = card.get("event", {})
-        if (
-            card["status"] not in INVALID
-            and card.get("time_range") == time_range
-            and all(previous.get(k) == event[k] for k in ("title", "environment", "asset"))
-        ):
+        if not previous:
+            continue
+        same_window = card.get("time_range") == time_range and previous.get("environment") == event["environment"]
+        exact = same_window and all(previous.get(k) == event[k] for k in ("title", "asset"))
+        # Same environment and time window with a near-identical (normalized) title is the
+        # same node re-submitted with lightly reworded/re-counted wording. Different time
+        # windows stay distinct, so deliberately separate findings are not blocked.
+        near = same_window and normalized_title(previous.get("title", "")) == norm
+        if exact or near:
             if submission_key and card.get("event") == event:
                 break  # Store's idempotency key still validates all evidence and inputs.
             raise ValueError(
-                f"Existing event {card['id']} r{card['revision']}; inspect it and use revise_event if this is the same event"
+                f"疑似重复事件 {card['id']} r{card['revision']}（同环境、标题高度相似）；"
+                "请 get_object 查看后用 revise_event 合并证据，而不是新建卡"
             )
     return submit_card(
         store,
