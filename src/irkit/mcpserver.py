@@ -201,6 +201,16 @@ def build_server(case_dir):
         )
 
     @mcp.tool()
+    def system_overview() -> dict:
+        """Group sources/datasets into logical systems by their directory layout (read-only).
+        Use this to divide investigation by system and time window, keeping a front proxy and its
+        backend application in one task, instead of splitting by log layer. Volume is not priority.
+        """
+        from .systems import system_overview as _system_overview
+
+        return _system_overview(store)
+
+    @mcp.tool()
     def annotate_path(
         card_id: str,
         expected_revision: int,

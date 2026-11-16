@@ -59,14 +59,15 @@ MAIN = """
 
 工作流程：
 执行约定：所有原生子 Agent 使用前台调用，不设置 run_in_background=true。等待调用返回后检查任务交付，
-再继续下一阶段。可以在同一轮并行发起最多两个前台取证调用，但不要在子任务未返回时发送最终回复。
+再继续下一阶段。可以在同一轮并行发起最多四个前台取证调用，但不要在子任务未返回时发送最终回复。
 仅“已派发/正在运行”不是交付；综合 Agent 必须实际生成本轮报告、完成任务，主 Agent 核对报告 ID 后才能收尾。
 每次派发前用一两句话说明目的，返回后说明发现、产物和下一步；避免连续只输出工具调用而无进展说明。
 1. 检查未完成任务与已有产物。针对可用源创建 ir-prepare 任务，再实际调用同名原生子 Agent。
    向子 Agent 提供 task_id、问题、范围、输入 ID 与简短背景；不要假定它能看到你的会话。
 2. 数据化后分页 input_coverage_page，核对每份输入。未处理/部分入库先交数据准备补齐，真正处理限制用 record_input_gap 记录依据。
    选择少量可验证的问题，创建并启动 ir-investigate。
-   最多两个 Agent 同时运行。按问题而非文件机械分工；允许一个问题查询多个数据源。
+   先 system_overview 看有哪些系统；按“系统×时间窗”分派，把前置代理与其后端应用放进同一任务，不按日志层拆分，也不按日志量定优先级。
+   最多四个 Agent 同时运行。按问题而非文件机械分工；允许一个问题查询多个数据源。
 3. 每轮读取 pending 补证任务，优先处理能改变起点、成功状态、影响范围的问题，由你调用原生取证 Agent。
    关键卡片需要前置和后续问题的处理结果，缺日志可保留明确缺口。检查同卡片修订/范围是否已查，避免重复。
    派发综合前调用 closure_readiness，逐个处理 UNFINISHED_TASK/BODY_UNINSPECTED/DECODING_INCOMPLETE 等可执行阻塞。
@@ -150,6 +151,9 @@ statement 按“事件标题；已观察到的行为（环境/时间/来源/对�
 遇到结果变化时，使用 trace_events（或同等有界 SQL）按环境、主体/对象、时间读取完整序列，保留所有状态，不只筛成功。
 比较前置失败→中间修改→同类重试的输入与结果，回查原始行；必要时扩展时间窗，截断则缩小窗口。操作不限于认证或 Web。
 不同事件用 submit_link 连接，relation_type 选择 sequence/same_session/causal/association，并注明共享实体、机制、反证与缺口；同 IP、时间相近只能提出候选关系。
+每张关键事件卡提交后调用 annotate_path：stage（recon/initial_access/credential/execution/persistence/privilege/lateral/collection/exfiltration/impact）、
+outcome（attempted/blocked/reached_app/app_confirmed/impact_confirmed）、key_time（该节点最有代表性的带时区时间）、chains（同一攻击线的短标签）。
+标注不改变事实、不影响证据校验，用于排时间线与分链。已确认失败的尝试标 outcome=attempted/blocked 后作为单个节点保留，不反复修订、不深挖。
 卡片主文只保留关键行为与少量证据锚点，完整计数/查询放 check 和 run；只把能改变核心结论的待证问题登记为补证任务。
 有边界的负证据也记录，zero_hits 只能来自返回零行的成功且不截断查询，不是 COUNT=0 的一行结果。
 查询失败、结果截断、源缺失应记 incomplete/inconclusive，不作为排除结论。
@@ -179,6 +183,8 @@ read_source 遇到 UTF-8 错误时，按原始字节用 encoding="latin-1" 回�
     + """
 你以新上下文综合已有证据，先看 board_context 索引，分批检索相关实体/卡片，list_objects(check/link) 查看覆盖。
 按证据把阶段与实体串联；每个 submit_link 都写独立关系证据，推断 inferred=true；仅时间接近不构成因果。
+用 annotate_path 为每张进入路径的关键卡确认 stage/chains/outcome/key_time，使报告第三章能按链、按时间呈现攻击路径。
+某条链到达入口或凭据阶段却没有执行/持久化/横向/外传节点，且该时间窗仍有未解释的信号或未覆盖时段时，向主 Agent 提出一个定向的后续发现问题，不要直接收口。
 区分攻击尝试、成功利用、执行、持久化、凭证使用、横向移动、数据访问；没有某阶段证据就明确空缺。
 检查时间时区、不同 IP/NAT、账号复用、缺日志、同源重复旁证、候选/过期卡片及相互冲突。
 独立检查卡片是否补写了未观察到的机制、攻击意图、身份或成功状态；有过度推断时 revise_event 缩小陈述（历史文本卡仍用 revise_card）。
@@ -237,6 +243,7 @@ COMMON_TOOLS = [
     "input_coverage_page",
     "profile_source_operations",
     "review_event_coverage",
+    "system_overview",
 ]
 ROLE_TOOLS = {
     "ir-prepare": COMMON_TOOLS

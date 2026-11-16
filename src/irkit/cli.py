@@ -143,7 +143,7 @@ def launch_arguments(store, model=None, print_mode=False, budget=3.0):
     env.update(
         {
             "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "1",
-            "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS": "2",
+            "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS": "4",
             "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
             # Keep native subagent calls attached to the main turn through synthesis.
             "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",

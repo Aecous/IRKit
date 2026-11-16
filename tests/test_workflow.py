@@ -323,7 +323,7 @@ def test_cli_and_native_agent_config(case, tmp_path):
     assert all(t.startswith("mcp__ir__") for a in definitions.values() for t in a["tools"])
     args, env, workspace = launch_arguments(case)
     assert "--strict-mcp-config" in args and "--dangerously-skip-permissions" not in args
-    assert env["CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS"] == "2"
+    assert env["CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS"] == "4"
     assert workspace != Path(json.loads((case.root / "case.json").read_text())["input_directory"])
     assert "review" not in {t for tools in ROLE_TOOLS.values() for t in tools}
 
