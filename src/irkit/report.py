@@ -5,7 +5,7 @@ import html
 from .evidence import case_metadata
 from .input_coverage import input_coverage
 from .integrity import delivery_snapshot, parent_changed, pending
-from .store import dumps, now, uid
+from .store import dumps, now, review_mode, uid
 
 
 def safe(text):
@@ -90,8 +90,13 @@ def _render_report(store, assessment, gaps, next_questions, delivery, report_con
         raise ValueError("delivery must be final or progress")
     from .verification import closure_readiness, require_ready
 
+    fast = review_mode() == "off"
     readiness = closure_readiness(store)
-    if delivery == "final":
+    # In fast mode, review-only closure blockers (pending re-review, unreviewed follow-ups,
+    # unresolved conflicts awaiting synthesis) become warnings carried into the report
+    # instead of hard blocks, since the independent synthesis pass is skipped. Evidence
+    # contracts remain enforced by the individual tools.
+    if delivery == "final" and not fast:
         require_ready(readiness)
         if any(t.get("event_policy_version", 0) >= 2 for t in store.all("task")):
             snapshot = delivery_snapshot(store)
@@ -156,9 +161,12 @@ def _render_report(store, assessment, gaps, next_questions, delivery, report_con
         if parent_changed(task, parent):
             continue
         if (
-            not review
-            or not current_followup_review(task, review.get("synthesis_task_id"), artifacts)
-            or tasks.get(review.get("synthesis_task_id"), {}).get("status") == "failed"
+            not fast
+            and (
+                not review
+                or not current_followup_review(task, review.get("synthesis_task_id"), artifacts)
+                or tasks.get(review.get("synthesis_task_id"), {}).get("status") == "failed"
+            )
         ):
             raise ValueError(f"Review current follow-up evidence before rendering: {task['id']}")
     rid = uid("report")
@@ -169,6 +177,18 @@ def _render_report(store, assessment, gaps, next_questions, delivery, report_con
         "",
         "本报告是阶段性分析。候选、推断和人工审核状态分别标注；缺少证据不等于证明安全。",
         f"交付类型：{delivery}；未决阻塞项：{len(readiness['issues'])}。最终交付也不等同于人工审核通过。",
+        *(
+            ["复核模式：已关闭独立综合复核（IRKIT_REVIEW_MODE=off），结论未经独立复核，"
+             "以下未决项仅作提示，需人工核对。"]
+            if fast
+            else []
+        ),
+        *(
+            [f"- 未决提示：{issue.get('code')} {issue.get('object_id', '')} — {issue.get('action', '')}"
+             for issue in readiness["issues"][:30]]
+            if fast and readiness["issues"]
+            else []
+        ),
         "",
     ]
     structured, evidence_labels = chapters(

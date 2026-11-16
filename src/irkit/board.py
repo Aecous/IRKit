@@ -3,7 +3,7 @@ from __future__ import annotations
 from .datasets import dataset_row
 from .evidence import case_metadata, raw_ref
 from .integrity import disposed, fact_hash, parent_changed, pending, unique_refs
-from .store import dumps, now
+from .store import dumps, now, review_mode
 
 
 def validate_refs(store, refs):
@@ -611,6 +611,7 @@ def case_context(store):
             if not (task.get("source_lead_id") and not task.get("parent_card_id"))
         ],
         "page_note": "Use list_objects for all pages; source_overview derives sources from event cards",
+        "review_mode": review_mode(),
         "card_status_counts": {
             s: sum(c["status"] == s for c in store.all("card"))
             for s in ("candidate", "reviewed", "rejected", "stale")

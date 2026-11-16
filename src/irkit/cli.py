@@ -13,7 +13,7 @@ import typer
 
 from .board import case_context, review_card
 from .evidence import initialize_case
-from .store import Store, dumps
+from .store import Store, dumps, review_mode
 from .templates import MAIN, ROLE_TOOLS, ROLES, agent_definitions
 
 app = typer.Typer(no_args_is_help=True, help="Claude 原生子 Agent 的本地日志调查工具")
@@ -62,7 +62,8 @@ def provider_configuration():
 def configure_workspace(store):
     workspace = store.root / "workspace"
     (workspace / ".claude/agents").mkdir(parents=True, exist_ok=True)
-    (workspace / "CLAUDE.md").write_text(MAIN, encoding="utf-8")
+    mode = review_mode()
+    (workspace / "CLAUDE.md").write_text(MAIN.replace("{@review_mode}", mode), encoding="utf-8")
     config = {
         "mcpServers": {
             "ir": {"command": sys.executable, "args": ["-m", "irkit", "mcp", "--case", str(store.root)]}
@@ -151,6 +152,9 @@ def launch_arguments(store, model=None, print_mode=False, budget=3.0):
             "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS": "0",
             "MCP_TIMEOUT": "30000",
             "MCP_TOOL_TIMEOUT": "360000",
+            # Propagate the review mode so the ir MCP server (a child process) and the
+            # report gates agree with the workflow the main prompt advertises.
+            "IRKIT_REVIEW_MODE": review_mode(),
         }
     )
     return args, env, workspace

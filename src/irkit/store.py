@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import uuid
 from contextlib import contextmanager
@@ -13,6 +14,19 @@ from pathlib import Path
 
 def now():
     return datetime.now(timezone.utc).isoformat()
+
+
+def review_mode():
+    """Investigation workflow intensity, set by IRKIT_REVIEW_MODE.
+
+    "full" (default) runs the independent synthesis pass and enforces every closure gate.
+    "off" ("fast"/"none" also accepted) skips the synthesis pass and relaxes review-only
+    closure gates for a faster small-log run. Evidence contracts (claims must reference
+    real rows, zero_hits rules) stay enforced in both modes — speed never trades away the
+    guarantee that conclusions are backed by re-queryable evidence.
+    """
+    value = (os.environ.get("IRKIT_REVIEW_MODE") or "full").strip().lower()
+    return "off" if value in ("off", "fast", "none", "skip", "0", "false") else "full"
 
 
 def uid(kind):
