@@ -201,6 +201,24 @@ def build_server(case_dir):
         )
 
     @mcp.tool()
+    def annotate_path(
+        card_id: str,
+        expected_revision: int,
+        stage: str | None = None,
+        chains: list[str] | None = None,
+        outcome: str | None = None,
+        key_time: str | None = None,
+    ) -> dict:
+        """Place an event card on the attack path and timeline without changing its observed facts.
+        stage: recon/initial_access/credential/execution/persistence/privilege/lateral/collection/exfiltration/impact/unknown.
+        outcome: attempted/blocked/reached_app/app_confirmed/impact_confirmed/unknown (how far the action got).
+        chains: short labels grouping nodes of one attack line; a node may join several chains.
+        key_time: the single most representative ISO time (with offset) used to order this node.
+        Annotations are excluded from the fact hash, so this never invalidates follow-ups or checks.
+        """
+        return events.annotate_path(store, card_id, expected_revision, stage, chains, outcome, key_time)
+
+    @mcp.tool()
     def scenario_guide(scenario: str) -> str:
         """Read trusted methodology: nginx, java, iis, windows, or general. No source-specific parser."""
         from .templates import GUIDES

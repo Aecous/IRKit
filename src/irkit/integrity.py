@@ -23,10 +23,14 @@ def disposed(obj):
 
 
 def fact_hash(card):
+    # Path annotations (stage/chains/outcome/key_time) describe where a node sits on the
+    # timeline and attack path. They are not facts, so changing them must not invalidate
+    # follow-ups whose parent_fact_hash was computed from the observed event.
     event = {
         k: v
         for k, v in card.get("event", {}).items()
-        if k not in ("upstream", "downstream", "source_lead_ids", "sources")
+        if k
+        not in ("upstream", "downstream", "source_lead_ids", "sources", "stage", "chains", "outcome", "key_time")
     }
     if "sources" in card.get("event", {}):
         event["sources"] = [

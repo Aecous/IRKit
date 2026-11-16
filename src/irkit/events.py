@@ -49,6 +49,24 @@ class EventInput(TypedDict):
 
 INVALID = {"stale", "rejected", "superseded"}
 
+# Attack-path annotations. Not facts: excluded from fact_hash, so editing them never
+# invalidates a card's follow-ups. Used only to order and group nodes in the timeline/path.
+STAGES = (
+    "recon",
+    "initial_access",
+    "credential",
+    "execution",
+    "persistence",
+    "privilege",
+    "lateral",
+    "collection",
+    "exfiltration",
+    "impact",
+    "unknown",
+)
+OUTCOMES = ("attempted", "blocked", "reached_app", "app_confirmed", "impact_confirmed", "unknown")
+ANNOTATION_FIELDS = ("stage", "chains", "outcome", "key_time")
+
 
 def text(value, name, limit=1500, empty=False):
     if not isinstance(value, str) or len(value) > limit or (not empty and not value.strip()):
@@ -73,7 +91,8 @@ def validate(store, event):
     if (
         not isinstance(event, dict)
         or not required.issubset(event)
-        or set(event) - required - {"claims", "source_lead_ids", "sources", "source_limitation", "timeline"}
+        or set(event) - required
+        - {"claims", "source_lead_ids", "sources", "source_limitation", "timeline", *ANNOTATION_FIELDS}
     ):
         raise ValueError("event fields: " + ", ".join(sorted(required)))
     result = {
@@ -135,7 +154,33 @@ def validate(store, event):
         store.get(lid, "source_lead")
     if ids:
         result["source_lead_ids"] = list(dict.fromkeys(ids))
+    result.update(annotations(event))
     return result
+
+
+def annotations(event):
+    """Validate optional path annotations; absent fields stay absent."""
+    out = {}
+    if "stage" in event:
+        if event["stage"] not in STAGES:
+            raise ValueError("stage must be one of: " + ", ".join(STAGES))
+        out["stage"] = event["stage"]
+    if "outcome" in event:
+        if event["outcome"] not in OUTCOMES:
+            raise ValueError("outcome must be one of: " + ", ".join(OUTCOMES))
+        out["outcome"] = event["outcome"]
+    if "chains" in event:
+        chains = event["chains"]
+        if not isinstance(chains, list) or len(chains) > 6 or any(not isinstance(c, str) for c in chains):
+            raise ValueError("chains: up to six short chain labels")
+        cleaned = [text(c, "chain", 80) for c in chains]
+        if len(set(cleaned)) != len(cleaned):
+            raise ValueError("chains must be distinct")
+        out["chains"] = cleaned
+    if "key_time" in event:
+        out["key_time"] = text(event["key_time"], "key_time", 45)
+        timestamp(out["key_time"])  # must carry an explicit offset
+    return out
 
 
 def timestamp(value):
@@ -298,7 +343,7 @@ def revise_event(
         **event,
         "source_lead_ids": event.get("source_lead_ids", old.get("event", {}).get("source_lead_ids", [])),
     }
-    for field in ("sources", "source_limitation", "timeline"):
+    for field in ("sources", "source_limitation", "timeline", *ANNOTATION_FIELDS):
         if field not in event and field in old.get("event", {}):
             event[field] = old["event"][field]
     removed = remove_claims or {}
@@ -338,3 +383,24 @@ def report_lines(card):
     for side, label in (("upstream", "前因"), ("downstream", "后果")):
         lines.append(f"{label}问题：{dumps(e[side])}")
     return lines
+
+
+def annotate_path(store, card_id, expected_revision, stage=None, chains=None, outcome=None, key_time=None):
+    """Set attack-path annotations on an event card without altering its observed facts.
+
+    Excluded from fact_hash, so this never invalidates the card's follow-ups or checks.
+    Only cards that already carry a structured event can be annotated.
+    """
+    card = store.get(card_id, "card")
+    if not card.get("event"):
+        raise ValueError("Only structured event cards carry path annotations")
+    if card["status"] in INVALID:
+        raise ValueError("Resolve the card's review/disposition before annotating its path")
+    requested = {"stage": stage, "chains": chains, "outcome": outcome, "key_time": key_time}
+    provided = {k: v for k, v in requested.items() if v is not None}
+    if not provided:
+        raise ValueError("Provide at least one of stage, chains, outcome, key_time")
+    merged = {**{k: card["event"][k] for k in ANNOTATION_FIELDS if k in card["event"]}, **provided}
+    checked = annotations({**card["event"], **merged})
+    event = {**card["event"], **checked}
+    return store.update(card_id, {"event": event}, expected_revision=expected_revision)

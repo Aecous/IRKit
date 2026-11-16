@@ -96,9 +96,11 @@ def validate(store, content):
 
 
 def event_order(card):
-    timeline = card.get("event", {}).get("timeline")
-    stamp = timeline.get("start") if timeline is not None else None
-    if timeline is None:  # Legacy range strings only sort if the leading timestamp has an offset.
+    event = card.get("event", {})
+    timeline = event.get("timeline")
+    # A node's position on the timeline prefers its explicit key_time annotation.
+    stamp = event.get("key_time") or (timeline.get("start") if timeline is not None else None)
+    if stamp is None:  # Legacy range strings only sort if the leading timestamp has an offset.
         match = re.match(
             r"^\s*(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2}))",
             card.get("time_range", ""),
@@ -110,6 +112,29 @@ def event_order(card):
         except ValueError:
             pass
     return (1, 0, card["id"])
+
+
+STAGE_LABELS = {
+    "recon": "探测",
+    "initial_access": "入口",
+    "credential": "凭据",
+    "execution": "执行",
+    "persistence": "持久化",
+    "privilege": "提权",
+    "lateral": "横向",
+    "collection": "数据收集",
+    "exfiltration": "外传",
+    "impact": "破坏/篡改",
+    "unknown": "阶段未定",
+}
+OUTCOME_LABELS = {
+    "attempted": "尝试",
+    "blocked": "被拦截",
+    "reached_app": "到达应用",
+    "app_confirmed": "应用确认",
+    "impact_confirmed": "影响确认",
+    "unknown": "结果未知",
+}
 
 
 def display_time(card):
@@ -135,6 +160,92 @@ def relation_display(link):
         "same_session": ("↔", "同会话"),
         "association": ("↔", "线索关联"),
     }[kind]
+
+
+def mermaid_label(text_value):
+    # Mermaid node text is wrapped in quotes; drop characters that would break the node.
+    return clean(text_value).replace('"', "'").replace("[", "(").replace("]", ")")[:60] or "节点"
+
+
+def build_chains(live, links):
+    """Group live event cards into attack chains from their `chains` annotation."""
+    chains = {}
+    for card in live:
+        for label in card.get("event", {}).get("chains", []) or []:
+            chains.setdefault(label, []).append(card)
+    for label in chains:
+        chains[label] = sorted(chains[label], key=event_order)
+    return chains
+
+
+def chain_gap_notes(nodes):
+    """Flag an attack line that stops before any outcome/persistence stage."""
+    stages = {n.get("event", {}).get("stage") for n in nodes}
+    advanced = {"execution", "persistence", "lateral", "collection", "exfiltration", "impact"}
+    footholds = {"initial_access", "credential", "privilege"}
+    if stages & footholds and not stages & advanced:
+        return [
+            "- ⚠ 该链在取得立足点后没有执行/持久化/横向/外传节点：可能被漏查，或确有边界。"
+            "应向后补证，或用检查记录说明该时间窗无可见后续行为。"
+        ]
+    return []
+
+
+def attack_path_section(store, live, links, cite):
+    lines = ["### 3.1 攻击路径（按链）", ""]
+    chains = build_chains(live, links)
+    if not chains:
+        lines += [
+            "（当前事件卡尚未标注攻击链与阶段，无法分链绘制路径；下方时间线为全量节点视图。）",
+            "可对关键事件调用 annotate_path 标注 stage/chains/outcome 后重新生成。",
+        ]
+        return lines
+    by_id = {c["id"]: c for c in live}
+    live_ids = set(by_id)
+    for label in sorted(chains):
+        nodes = chains[label]
+        lines += ["#### 链路：" + clean(label), "", "```mermaid", "flowchart TD"]
+        for node in nodes:
+            e = node.get("event", {})
+            stage = STAGE_LABELS.get(e.get("stage", ""), "阶段未定")
+            outcome = OUTCOME_LABELS.get(e.get("outcome", ""), "")
+            head = f"[{stage}" + (f"·{outcome}" if outcome else "") + "] "
+            lines.append(f'  {node["id"]}["{mermaid_label(head + e.get("title", node["statement"]))}"]')
+        # Edges from registered relations within this chain.
+        drawn = set()
+        chain_ids = {n["id"] for n in nodes}
+        for link in links:
+            if link["status"] in ("stale", "rejected", "superseded") or pending(link):
+                continue
+            a, b = link["from_card"], link["to_card"]
+            if a in chain_ids and b in chain_ids and a in live_ids and b in live_ids:
+                kind = link.get("relation_type", "association")
+                edge = f"  {a} --> {b}" if kind in ("sequence", "causal") and not link["inferred"] else f"  {a} -.-> {b}"
+                lines.append(edge)
+                drawn.add((a, b))
+                drawn.add((b, a))
+        # Where consecutive nodes in time have no relation, show a weak time-adjacency edge.
+        for earlier, later in zip(nodes, nodes[1:]):
+            if (earlier["id"], later["id"]) not in drawn:
+                lines.append(f'  {earlier["id"]} -.->|时间相邻| {later["id"]}')
+        lines += ["```", ""]
+        for node in nodes:
+            e = node.get("event", {})
+            lines.append(
+                "- "
+                + clean(display_time(node))
+                + "｜"
+                + STAGE_LABELS.get(e.get("stage", ""), "阶段未定")
+                + "｜"
+                + OUTCOME_LABELS.get(e.get("outcome", ""), "结果未标注")
+                + "｜"
+                + clean(e.get("observed", node["statement"]))
+                + " "
+                + cite(node["id"])
+            )
+        lines += chain_gap_notes(nodes)
+        lines += [""]
+    return lines
 
 
 def chapters(store, meta, assessment, content, cards, links, checks, datasets, gaps, questions, coverage=()):
@@ -204,16 +315,18 @@ def chapters(store, meta, assessment, content, cards, links, checks, datasets, g
         "",
         "## 3. 攻击时间线与攻击路径",
         "",
-        "以下按环境分别列出事件；记录时间不明确时不强行排序，先后关系不自动构成因果。",
+        "节点即事件卡；路径按关键时刻排序，阶段与结果来自标注，先后关系不自动构成因果。",
         "",
     ]
+    lines += attack_path_section(store, live, links, cite)
+    lines += ["", "### 3.2 全量时间线（按环境）", ""]
     environments = sorted({env_of(c) for c in live})
     for env in environments:
         lines += [
             "### 环境：" + clean(env),
             "",
-            "| 记录时间（保留原时区） | 来源线索 | 资产 | 已观察事件 | 证据 |",
-            "|---|---|---|---|---|",
+            "| 记录时间（保留原时区） | 阶段 | 结果 | 来源线索 | 资产 | 已观察事件 | 证据 |",
+            "|---|---|---|---|---|---|---|",
         ]
         subset = [c for c in live if env_of(c) == env]
         for c in sorted(subset, key=event_order):
@@ -224,6 +337,8 @@ def chapters(store, meta, assessment, content, cards, links, checks, datasets, g
                 + " | ".join(
                     [
                         clean(display_time(c)),
+                        STAGE_LABELS.get(e.get("stage", ""), "—"),
+                        OUTCOME_LABELS.get(e.get("outcome", ""), "—"),
                         clean("、".join(sources) or "未关联/未知"),
                         clean(e.get("asset", "unknown")),
                         clean(e.get("observed", c["statement"])),

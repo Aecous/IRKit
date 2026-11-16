@@ -249,7 +249,8 @@ ROLE_TOOLS = {
         "ingest_status",
         "resume_jsonl_ingest",
     ],
-    "ir-investigate": COMMON_TOOLS + ["inspect_request_bodies", "submit_event", "revise_event", "submit_link"],
+    "ir-investigate": COMMON_TOOLS
+    + ["inspect_request_bodies", "submit_event", "revise_event", "submit_link", "annotate_path"],
     "ir-synthesize": COMMON_TOOLS
     + [
         "inspect_request_bodies",
@@ -257,6 +258,7 @@ ROLE_TOOLS = {
         "revise_event",
         "revise_card",
         "submit_link",
+        "annotate_path",
         "review_followup",
         "review_plan",
         "register_environment_alias",
