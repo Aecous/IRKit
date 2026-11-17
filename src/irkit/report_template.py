@@ -1,12 +1,10 @@
 """Five fixed chapters with validated citations; semantics remain independently reviewed."""
 
-import html
 import re
 from typing import Literal, NotRequired, TypedDict
 
 from .events import timestamp
 from .integrity import pending
-from .source_leads import aggregate, card_sources
 
 
 class Citation(TypedDict):
@@ -21,77 +19,146 @@ class Finding(TypedDict):
     evidence: list[Citation]
 
 
+class AttackChain(TypedDict):
+    title: str
+    scope: str
+    summary: Finding
+    steps: list[Finding]
+    connections: list[Finding]
+
+
+class TimelineEntry(TypedDict):
+    time: str
+    source: str
+    target: str
+    activity: Finding
+
+
+class SourceSummary(TypedDict):
+    address: str
+    role: str
+    activity: Finding
+
+
 class ReportInput(TypedDict):
     scope_note: str
     conclusions: list[Finding]
     impacts: list[Finding]
     recommendations: list[Finding]
+    attack_chains: NotRequired[list[AttackChain]]
+    post_exploitation: NotRequired[list[Finding]]
+    timeline: NotRequired[list[TimelineEntry]]
+    sources: NotRequired[list[SourceSummary]]
 
 
-def clean(value):
-    return (
-        html.escape(str(value), quote=True).replace("|", "&#124;").replace("`", "&#96;").replace("\n", "<br>")
-    )
+NARRATIVE_FIELDS = {"attack_chains", "post_exploitation", "timeline", "sources"}
+BASE_FIELDS = {"scope_note", "conclusions", "impacts", "recommendations"}
 
 
-def validate(store, content):
-    if set(content) != {"scope_note", "conclusions", "impacts", "recommendations"}:
-        raise ValueError("report_content requires scope_note, conclusions, impacts, recommendations")
+def bounded_text(value, name, limit=4000):
+    if not isinstance(value, str) or not value.strip() or len(value) > limit:
+        raise ValueError(f"{name}: nonempty text <= {limit} characters required")
+
+
+def findings_in(content):
+    """One traversal for citation validation, source checks, and evidence appendix selection."""
+    for section in ("conclusions", "impacts", "recommendations", "post_exploitation"):
+        for finding in content.get(section, []):
+            yield section, finding
+    for chain in content.get("attack_chains", []):
+        yield "chain_summary", chain["summary"]
+        for finding in chain["steps"]:
+            yield "chain_step", finding
+        for finding in chain["connections"]:
+            yield "chain_connection", finding
+    for row in content.get("timeline", []):
+        yield "timeline", row["activity"]
+    for row in content.get("sources", []):
+        yield "source", row["activity"]
+
+
+def validate(store, content, require_narrative=False):
     if (
-        not isinstance(content["scope_note"], str)
-        or not content["scope_note"].strip()
-        or len(content["scope_note"]) > 6000
+        not isinstance(content, dict)
+        or set(content) - BASE_FIELDS - NARRATIVE_FIELDS
+        or not BASE_FIELDS <= set(content)
     ):
-        raise ValueError("Provide bounded report scope_note")
-    for section in ("conclusions", "impacts", "recommendations"):
-        rows = content[section]
-        if not isinstance(rows, list) or not rows or len(rows) > 50:
-            raise ValueError(f"{section}: supply 1..50 findings, including explicit unknown if needed")
-        for finding in rows:
-            if set(finding) != {"text", "certainty", "evidence"} or finding["certainty"] not in (
-                "confirmed",
-                "possible",
-                "unknown",
-            ):
-                raise ValueError("Finding requires text, certainty, evidence")
+        raise ValueError("report_content requires scope_note, conclusions, impacts, recommendations")
+    bounded_text(content["scope_note"], "scope_note", 6000)
+    narrative = bool(NARRATIVE_FIELDS & set(content))
+    if narrative and not NARRATIVE_FIELDS <= set(content):
+        raise ValueError(
+            "Narrative report requires attack_chains, post_exploitation, timeline and sources together"
+        )
+    for section in ("conclusions", "impacts", "recommendations", "post_exploitation"):
+        rows = content.get(section, [])
+        minimum = 0 if section == "post_exploitation" else 1
+        if not isinstance(rows, list) or not minimum <= len(rows) <= 50:
+            raise ValueError(f"{section}: supply {minimum}..50 findings")
+    for name, maximum in (("attack_chains", 12), ("timeline", 40), ("sources", 30)):
+        rows = content.get(name, [])
+        if not isinstance(rows, list) or len(rows) > maximum:
+            raise ValueError(f"{name}: list of at most {maximum} entries required")
+    for chain in content.get("attack_chains", []):
+        if not isinstance(chain, dict) or set(chain) != {"title", "scope", "summary", "steps", "connections"}:
+            raise ValueError("Each attack chain needs title, scope, summary, steps and connections")
+        bounded_text(chain["title"], "chain title", 160)
+        bounded_text(chain["scope"], "chain scope", 600)
+        for key in ("steps", "connections"):
+            if not isinstance(chain[key], list) or not 1 <= len(chain[key]) <= 30:
+                raise ValueError(f"chain {key}: 1..30 findings; describe an unknown connection explicitly")
+    for name, fields in (("timeline", {"time", "source", "target"}), ("sources", {"address", "role"})):
+        for row in content.get(name, []):
+            if not isinstance(row, dict) or set(row) != fields | {"activity"}:
+                raise ValueError(f"{name}: requires {sorted(fields)} and activity")
+            for field in fields:
+                bounded_text(row[field], f"{name}.{field}", 200)
+            if not isinstance(row["activity"], dict):
+                raise ValueError(f"{name}.activity requires a Finding")
+            bounded_text(row["activity"].get("text"), f"{name}.activity", 700)
+    for section, finding in findings_in(content):
+        if (
+            not isinstance(finding, dict)
+            or set(finding) != {"text", "certainty", "evidence"}
+            or finding["certainty"] not in {"confirmed", "possible", "unknown"}
+        ):
+            raise ValueError("Finding requires text, certainty, evidence")
+        bounded_text(finding["text"], "Finding text")
+        if not isinstance(finding["evidence"], list) or len(finding["evidence"]) > 30:
+            raise ValueError("Finding evidence must be a list of up to 30 citations")
+        if finding["certainty"] != "unknown" and not finding["evidence"]:
+            raise ValueError("Confirmed/possible findings require citations")
+        levels = []
+        for ref in finding["evidence"]:
             if (
-                not isinstance(finding["text"], str)
-                or not finding["text"].strip()
-                or len(finding["text"]) > 4000
+                not isinstance(ref, dict)
+                or set(ref) - {"object_id", "revision", "claim_key"}
+                or not {"object_id", "revision"} <= set(ref)
             ):
-                raise ValueError("Finding text required, <=4000")
-            if not isinstance(finding["evidence"], list) or len(finding["evidence"]) > 30:
-                raise ValueError("Finding evidence must be a list of up to 30 citations")
-            if finding["certainty"] != "unknown" and not finding["evidence"]:
-                raise ValueError("Confirmed/possible findings require citations")
-            levels = []
-            for ref in finding["evidence"]:
-                if set(ref) - {"object_id", "revision", "claim_key"} or not {
-                    "object_id",
-                    "revision",
-                }.issubset(ref):
-                    raise ValueError("Citation requires object_id and revision")
-                obj = store.get(ref["object_id"])
-                if (
-                    obj["kind"] not in ("card", "check", "link")
-                    or obj["revision"] != ref["revision"]
-                    or obj.get("status") in ("stale", "rejected", "superseded")
-                    or pending(obj)
-                ):
-                    raise ValueError(
-                        "Report citation must reference a current reviewed card/check/link revision"
-                    )
-                if obj["kind"] == "card" and obj.get("event", {}).get("claims"):
-                    claims = [c for c in obj["event"]["claims"] if c["key"] == ref.get("claim_key")]
-                    if len(claims) != 1:
-                        raise ValueError("Cite an exact claim_key for a structured claim")
-                    levels.append(claims[0]["level"])
-                elif ref.get("claim_key"):
-                    raise ValueError("Unknown claim_key")
-            if section == "impacts" and finding["certainty"] == "confirmed" and "application" not in levels:
-                raise ValueError(
-                    "Confirmed impact needs application-level evidence; request/HTTP response alone is insufficient"
-                )
+                raise ValueError("Citation requires object_id and revision")
+            obj = store.get(ref["object_id"])
+            if (
+                obj["kind"] not in {"card", "check", "link"}
+                or obj["revision"] != ref["revision"]
+                or obj.get("status") in {"stale", "rejected", "superseded"}
+                or pending(obj)
+            ):
+                raise ValueError("Report citation must reference a current reviewed card/check/link revision")
+            if obj["kind"] == "card" and obj.get("event", {}).get("claims"):
+                claims = [c for c in obj["event"]["claims"] if c["key"] == ref.get("claim_key")]
+                if len(claims) != 1:
+                    raise ValueError("Cite an exact claim_key for a structured claim")
+                levels.append(claims[0]["level"])
+            elif ref.get("claim_key"):
+                raise ValueError("Unknown claim_key")
+        if section == "impacts" and finding["certainty"] == "confirmed" and "application" not in levels:
+            raise ValueError(
+                "Confirmed impact needs application-level evidence; request/HTTP response alone is insufficient"
+            )
+    if require_narrative and not narrative:
+        raise ValueError(
+            "Final report requires attack_chains, post_exploitation, timeline and sources; write the five-chapter narrative first"
+        )
     return content
 
 
@@ -114,44 +181,6 @@ def event_order(card):
     return (1, 0, card["id"])
 
 
-STAGE_LABELS = {
-    "recon": "探测",
-    "initial_access": "入口",
-    "credential": "凭据",
-    "execution": "执行",
-    "persistence": "持久化",
-    "privilege": "提权",
-    "lateral": "横向",
-    "collection": "数据收集",
-    "exfiltration": "外传",
-    "impact": "破坏/篡改",
-    "unknown": "阶段未定",
-}
-OUTCOME_LABELS = {
-    "attempted": "尝试",
-    "blocked": "被拦截",
-    "reached_app": "到达应用",
-    "app_confirmed": "应用确认",
-    "impact_confirmed": "影响确认",
-    "unknown": "结果未知",
-}
-
-
-def display_time(card):
-    original = card.get("time_range", "unknown")
-    timeline = card.get("event", {}).get("timeline", {})
-    if not timeline:
-        return original
-    basis = {"recorded_offset": "原始偏移", "inferred_offset": "推定偏移", "unknown": "时间或时区未知"}[
-        timeline["basis"]
-    ]
-    normalized = timeline.get("start", "")
-    if normalized and timeline["end"] != normalized:
-        normalized += " 至 " + timeline["end"]
-    detail = " · ".join(filter(None, (normalized, basis, timeline.get("note"))))
-    return original + "（" + detail + "）"
-
-
 def relation_display(link):
     kind = link.get("relation_type", "association")
     return {
@@ -162,289 +191,124 @@ def relation_display(link):
     }[kind]
 
 
-def mermaid_label(text_value):
-    # Mermaid node text is wrapped in quotes; drop characters that would break the node.
-    return clean(text_value).replace('"', "'").replace("[", "(").replace("]", ")")[:60] or "节点"
+def prose(value):
+    """Plain authored text, escaped for Markdown without turning paragraphs into HTML entities."""
+    value = str(value).replace("\r\n", "\n").replace("\r", "\n")
+    value = value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return re.sub(r"([\\`*_{}\[\]#|])", r"\\\1", value)
 
 
-def build_chains(live, links):
-    """Group live event cards into attack chains from their `chains` annotation."""
-    chains = {}
-    for card in live:
-        for label in card.get("event", {}).get("chains", []) or []:
-            chains.setdefault(label, []).append(card)
-    for label in chains:
-        chains[label] = sorted(chains[label], key=event_order)
-    return chains
+def chapters(
+    store,
+    meta,
+    assessment,
+    content,
+    cards,
+    links,
+    checks,
+    datasets,
+    gaps,
+    questions,
+    coverage=(),
+    appendix_name="evidence.md",
+):
+    # Do not reconstruct a chain from card order or matching addresses. The author supplies
+    # the narrative and explicit connections. Internal state remains in the workbench.
+    labels = {}
+    for _, finding in findings_in(content or {}):
+        for ref in finding["evidence"]:
+            labels.setdefault(ref["object_id"], f"E-{len(labels) + 1:03d}")
 
-
-def chain_gap_notes(nodes):
-    """Flag an attack line that stops before any outcome/persistence stage."""
-    stages = {n.get("event", {}).get("stage") for n in nodes}
-    advanced = {"execution", "persistence", "lateral", "collection", "exfiltration", "impact"}
-    footholds = {"initial_access", "credential", "privilege"}
-    if stages & footholds and not stages & advanced:
-        return [
-            "- ⚠ 该链在取得立足点后没有执行/持久化/横向/外传节点：可能被漏查，或确有边界。"
-            "应向后补证，或用检查记录说明该时间窗无可见后续行为。"
+    def finding_text(finding, recommendation=False):
+        refs = list(dict.fromkeys(ref["object_id"] for ref in finding["evidence"]))
+        citations = " ".join(f"[{labels[oid]}]({appendix_name}#{labels[oid].lower()})" for oid in refs)
+        prefix = {"confirmed": "", "possible": "**可能**：", "unknown": "**尚无法确认**："}[
+            finding["certainty"]
         ]
-    return []
+        if recommendation:
+            prefix = ""
+        return prefix + prose(finding["text"]) + (" " + citations if citations else "")
 
+    def paragraphs(rows, recommendation=False):
+        out = []
+        for row in rows:
+            out += [finding_text(row, recommendation=recommendation), ""]
+        return out
 
-def attack_path_section(store, live, links, cite):
-    lines = ["### 3.1 攻击路径（按链）", ""]
-    chains = build_chains(live, links)
-    if not chains:
+    lines = ["## 1. 事件概述", "", prose(content["scope_note"] if content else assessment), ""]
+    if content:
+        lines += paragraphs(content["conclusions"])
+    lines += ["## 2. 攻击链路还原", ""]
+    chains = (content or {}).get("attack_chains", [])
+    for index, chain in enumerate(chains, 1):
         lines += [
-            "（当前事件卡尚未标注攻击链与阶段，无法分链绘制路径；下方时间线为全量节点视图。）",
-            "可对关键事件调用 annotate_path 标注 stage/chains/outcome 后重新生成。",
+            f"### 2.{index} {prose(chain['title'])}",
+            "",
+            prose(chain["scope"]),
+            "",
+            finding_text(chain["summary"]),
+            "",
         ]
-        return lines
-    by_id = {c["id"]: c for c in live}
-    live_ids = set(by_id)
-    for label in sorted(chains):
-        nodes = chains[label]
-        lines += ["#### 链路：" + clean(label), "", "```mermaid", "flowchart TD"]
-        for node in nodes:
-            e = node.get("event", {})
-            stage = STAGE_LABELS.get(e.get("stage", ""), "阶段未定")
-            outcome = OUTCOME_LABELS.get(e.get("outcome", ""), "")
-            head = f"[{stage}" + (f"·{outcome}" if outcome else "") + "] "
-            lines.append(f'  {node["id"]}["{mermaid_label(head + e.get("title", node["statement"]))}"]')
-        # Edges from registered relations within this chain.
-        drawn = set()
-        chain_ids = {n["id"] for n in nodes}
-        for link in links:
-            if link["status"] in ("stale", "rejected", "superseded") or pending(link):
-                continue
-            a, b = link["from_card"], link["to_card"]
-            if a in chain_ids and b in chain_ids and a in live_ids and b in live_ids:
-                kind = link.get("relation_type", "association")
-                edge = f"  {a} --> {b}" if kind in ("sequence", "causal") and not link["inferred"] else f"  {a} -.-> {b}"
-                lines.append(edge)
-                drawn.add((a, b))
-                drawn.add((b, a))
-        # Where consecutive nodes in time have no relation, show a weak time-adjacency edge.
-        for earlier, later in zip(nodes, nodes[1:]):
-            if (earlier["id"], later["id"]) not in drawn:
-                lines.append(f'  {earlier["id"]} -.->|时间相邻| {later["id"]}')
-        lines += ["```", ""]
-        for node in nodes:
-            e = node.get("event", {})
-            lines.append(
-                "- "
-                + clean(display_time(node))
-                + "｜"
-                + STAGE_LABELS.get(e.get("stage", ""), "阶段未定")
-                + "｜"
-                + OUTCOME_LABELS.get(e.get("outcome", ""), "结果未标注")
-                + "｜"
-                + clean(e.get("observed", node["statement"]))
-                + " "
-                + cite(node["id"])
-            )
-        lines += chain_gap_notes(nodes)
-        lines += [""]
-    return lines
-
-
-def chapters(store, meta, assessment, content, cards, links, checks, datasets, gaps, questions, coverage=()):
-    from .integrity import environment_names
-
-    names = environment_names(store)
-
-    def env_of(c):
-        value = c.get("event", {}).get("environment", "unknown")
-        return names.get(value, value)
-
-    live = [c for c in cards if c["status"] not in ("stale", "rejected", "superseded") and not pending(c)]
-    labels = {o["id"]: f"E-{i:03d}" for i, o in enumerate(cards + links + checks, 1)}
-
-    def cite(oid):
-        return f"[{labels[oid]}](#evidence-{oid})"
-
-    def findings(rows, recommendation=False):
-        result = []
-        for r in rows:
-            refs = " ".join(
-                cite(ref["object_id"])
-                + " r"
-                + str(ref["revision"])
-                + ("#" + clean(ref["claim_key"]) if ref.get("claim_key") else "")
-                for ref in r["evidence"]
-            )
-            certainty = {"confirmed": "已证实", "possible": "可能", "unknown": "无法判定"}[r["certainty"]]
-            prefix = "建议" if recommendation else certainty
-            result.append("- **" + prefix + "**：" + clean(r["text"]) + " " + refs)
-        return result
-
-    lines = [
-        "## 1. 事件背景与调查范围",
+        for number, step in enumerate(chain["steps"], 1):
+            # Each step is its own paragraph and includes the author's time, action and result.
+            lines += [f"**步骤 {number}**", "", finding_text(step), ""]
+        lines += ["**关联依据与边界**", "", *paragraphs(chain["connections"])]
+    if not chains:
+        lines += ["现有结果尚不足以组织出有证据支持的完整攻击链。不能据此排除其他攻击活动。", ""]
+    lines += ["## 3. 后渗透操作与影响", "", "### 3.1 已观察到的后渗透操作", ""]
+    post = (content or {}).get("post_exploitation", [])
+    lines += paragraphs(post) if post else ["当前报告未确认可单独列出的后渗透操作。", ""]
+    lines += ["### 3.2 影响评估", ""]
+    lines += paragraphs(content["impacts"]) if content else ["当前证据不足以确认具体影响范围。", ""]
+    lines += [
+        "## 4. 攻击时间线与来源",
         "",
-        "用户反馈（待验证）：" + clean(meta.get("background") or "未提供背景，开展自主调查。"),
+        "### 4.1 关键时间线",
         "",
-        clean(content["scope_note"]) if content else "范围以本调查登记的日志、已发布分区与下方证据附录为准。",
-        "",
-        f"当前可用数据集：{sum(d['status'] not in ('stale', 'rejected', 'superseded') for d in datasets)} 个。各分区行数与质量分别列于附录；不自动相加为唯一事件数量。",
-        f"输入清单登记 {len(coverage)} 份。原文引用全覆盖或哈希重复 "
-        f"{sum(row['state'] in {'complete', 'duplicate'} for row in coverage)} 份，"
-        "逐文件覆盖及缺口见附录「数据范围与质量」。",
-        "时间沿用证据记录的时区与精度；无时区或缺失时间不得推定为 UTC。最早可见活动不等于真实攻击起点。",
-        "",
-        "## 2. 事件结论与影响评估",
+        "时间以每项标明的时区与精度为准。最早可见记录不等于真实攻击起点。",
         "",
     ]
-    if content:
-        lines += [
-            "### 2.1 事件结论",
-            "",
-            *findings(content["conclusions"]),
-            "",
-            "### 2.2 影响评估",
-            "",
-            *findings(content["impacts"]),
-        ]
+    timeline = (content or {}).get("timeline", [])
+    if timeline:
+        lines += ["| 时间 | 来源 | 目标 | 行为与结果 |", "| --- | --- | --- | --- |"]
+        for row in timeline:
+            cells = [prose(row[k]).replace("\n", " ") for k in ("time", "source", "target")]
+            cells.append(finding_text(row["activity"]).replace("\n", " "))
+            lines.append("| " + " | ".join(cells) + " |")
     else:
-        lines += [
-            "历史/阶段摘要（自由文本，未提供结构化结论）：",
-            clean(assessment),
-            "",
-            "确切影响：未提交可验证的结构化影响结论。",
-        ]
+        lines += ["当前结果尚不足以列出可靠的关键时间线。"]
     lines += [
         "",
-        "## 3. 攻击时间线与攻击路径",
+        "### 4.2 来源与相关地址",
         "",
-        "节点即事件卡；路径按关键时刻排序，阶段与结果来自标注，先后关系不自动构成因果。",
+        "来源地址、外联目标和跳板需分别理解；同一地址不能单独证明同一攻击者。",
         "",
     ]
-    lines += attack_path_section(store, live, links, cite)
-    lines += ["", "### 3.2 全量时间线（按环境）", ""]
-    environments = sorted({env_of(c) for c in live})
-    for env in environments:
-        lines += [
-            "### 环境：" + clean(env),
-            "",
-            "| 记录时间（保留原时区） | 阶段 | 结果 | 来源线索 | 资产 | 已观察事件 | 证据 |",
-            "|---|---|---|---|---|---|---|",
-        ]
-        subset = [c for c in live if env_of(c) == env]
-        for c in sorted(subset, key=event_order):
-            e = c.get("event", {})
-            sources = [x["address"] + "（" + x["field"] + "）" for x in card_sources(store, c)]
+    sources = (content or {}).get("sources", [])
+    if sources:
+        lines += ["| 地址 | 角色 | 关联行为与归因边界 |", "| --- | --- | --- |"]
+        for row in sources:
             lines.append(
                 "| "
                 + " | ".join(
                     [
-                        clean(display_time(c)),
-                        STAGE_LABELS.get(e.get("stage", ""), "—"),
-                        OUTCOME_LABELS.get(e.get("outcome", ""), "—"),
-                        clean("、".join(sources) or "未关联/未知"),
-                        clean(e.get("asset", "unknown")),
-                        clean(e.get("observed", c["statement"])),
-                        cite(c["id"]),
+                        prose(row["address"]),
+                        prose(row["role"]),
+                        finding_text(row["activity"]).replace("\n", " "),
                     ]
                 )
                 + " |"
             )
-    if not live:
-        lines += ["尚无当前有效事件，不能据此构造攻击路径。"]
-    lines += ["", "### 已登记的事件关系", ""]
-    for link in links:
-        if link["status"] in ("stale", "rejected", "superseded") or pending(link):
-            continue
-        if not all(cid in {c["id"] for c in live} for cid in (link["from_card"], link["to_card"])):
-            continue
-        arrow, label = relation_display(link)
-        lines += [
-            "- "
-            + cite(link["from_card"])
-            + f" {arrow} "
-            + cite(link["to_card"])
-            + f"（{label}）："
-            + clean(link["relation"])
-            + "；"
-            + ("推断关系" if link["inferred"] else "提交为直接观察的关系")
-            + " "
-            + cite(link["id"])
-        ]
-    lines += [
-        "",
-        "## 4. 攻击来源与具体行为",
-        "",
-        "来源记录不等于真实攻击者身份；共享出口、代理及转发头可信度需分别验证。",
-        "",
-    ]
-    sources = aggregate(store)
-    for source in sources:
-        lines += [
-            "### " + clean(source["address"]),
-            f"- 来源字段：{clean(source['field'])}；匹配方式：{clean(source['match_mode'])}；可信度：{clean(source['attribution'])}",
-        ]
-        for card in source["cards"]:
-            lines += [
-                "- 事件："
-                + cite(card["id"])
-                + "；"
-                + clean(card["environment"])
-                + " / "
-                + clean(card["asset"])
-                + "；"
-                + clean(card["time_range"])
-                + ("" if card["current"] else "（历史/待复核，不作为当前事实）")
-            ]
-        for check in source["checks"]:
-            lines += [
-                "- 检查："
-                + cite(check["id"])
-                + "；"
-                + clean(check["question"])
-                + ("" if check["current"] else "（历史/过期/待复核）"),
-                "  - 已查范围：" + clean(check["scope"]),
-                "  - 结果："
-                + clean(check["outcome"])
-                + "；结论："
-                + clean(check.get("conclusion") or "未单独记录，见检查和事件卡")
-                + "；限制："
-                + clean(check["limitations"]),
-            ]
-            for profile in check.get("source_operation_profiles") or []:
-                lines.append(
-                    "  - 来源基线："
-                    + clean(profile["dataset_id"])
-                    + " / "
-                    + clean(profile["field"])
-                    + f"，匹配 {profile['matched_rows']} 条，保存 {profile['saved_groups']}/{profile['total_groups']} 组"
-                    + "，按 "
-                    + clean(", ".join(profile["operation_fields"]))
-                    + " 分组。"
-                    + "保存范围与实际复核范围分别记录。"
-                )
-        lines += ["- 缺口：" + clean(gap) for gap in source["gaps"]]
-    if not sources:
-        lines += ["事件卡尚未关联来源；不代表不存在攻击来源。"]
-    lines += [
-        "",
-        "## 5. 证据缺口与处置建议",
-        "",
-        *["- 证据缺口：" + clean(x) for x in gaps],
-        *["- 待验证：" + clean(x) for x in questions],
-    ]
+    else:
+        lines += ["现有结果未确定可可靠归因的攻击来源。"]
+    lines += ["", "## 5. 调查局限与处置建议", "", "### 5.1 影响结论的证据局限", ""]
+    lines += ["- " + prose(gap) for gap in gaps] or ["本次未额外列出局限，结论仍限定于上述可见数据。"]
+    if questions:
+        lines += ["", "需要进一步确认：", "", *["- " + prose(q) for q in questions]]
+    lines += ["", "### 5.2 处置建议", ""]
     if content:
-        lines += findings(content["recommendations"], recommendation=True)
-    if not gaps and not questions:
-        lines += ["未额外声明缺口；具体日志可见性限制仍见各排查记录。"]
-    lines += ["", "## 附录：证据与调查记录", ""]
-    for obj in cards + links + checks:
-        lines += [
-            '<a id="evidence-' + obj["id"] + '"></a>',
-            f"- **{labels[obj['id']]}** → `{obj['id']}` r{obj['revision']}"
-            + ("；原始引用：" + clean(json_refs(obj)) if obj["kind"] == "card" else ""),
-        ]
+        lines += paragraphs(content["recommendations"], recommendation=True)
+    else:
+        lines += ["需结合已确认的行为和实际环境制定处置措施。", ""]
+    lines += ["---", "", f"[证据明细附录]({appendix_name})", ""]
     return lines, labels
-
-
-def json_refs(obj):
-    from .store import dumps
-
-    return dumps(obj.get("evidence", []))

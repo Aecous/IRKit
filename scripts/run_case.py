@@ -12,17 +12,19 @@ from pathlib import Path
 
 from watch_case import CaseProgress
 
-from irkit import telemetry
+from irkit import DEFAULT_BUDGET_USD, process_tree, telemetry
 from irkit.cli import launch_arguments
 from irkit.completion import assess, checkpoint
 from irkit.store import Store, uid
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("case_dir", type=Path)
-parser.add_argument("--budget", type=float, default=8)
+parser.add_argument("--budget", type=float, default=DEFAULT_BUDGET_USD)
 parser.add_argument("--instruction", default="")
+parser.add_argument("--report-only", action="store_true", help="Write a report from existing results without investigation")
 parser.add_argument("--instruction-file", type=Path)
 parser.add_argument("--timeout-seconds", type=int, default=0, help="会话总时限；0 表示不限时（默认）")
+parser.add_argument("--stop-file", type=Path, help=argparse.SUPPRESS)
 parser.add_argument(
     "--analysis-only", action="store_true", help="Disable data preparation and ingestion tools"
 )
@@ -37,7 +39,7 @@ try:
     fcntl.flock(session_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
 except BlockingIOError:
     raise SystemExit("该案件已有 Claude 会话运行，请等待完成后再启动") from None
-args, env, cwd = launch_arguments(store, print_mode=True, budget=options.budget)
+args, env, cwd = launch_arguments(store, print_mode=True, budget=options.budget, report_only=options.report_only)
 instruction = (
     options.instruction_file.read_text(encoding="utf-8") if options.instruction_file else options.instruction
 )
@@ -45,10 +47,11 @@ args[-1] += "\n" + instruction
 args[args.index("--output-format") + 1] = "stream-json"
 args.insert(1, "--verbose")
 telemetry.initialize(store)
-baseline = checkpoint(store)
+baseline = checkpoint(store, task_mode="report" if options.report_only else "investigation")
 runtime_id = uid("session")
-telemetry.record(store, runtime_id, {"type": "session_start", "instruction": args[-1]})
-if options.analysis_only:
+telemetry.record(store, runtime_id, {"type": "session_start", "instruction": args[-1],
+                                     "review_mode": baseline["review_mode"], "task_mode": baseline["task_mode"]})
+if options.analysis_only and not options.report_only:
     args[-1:-1] = [
         "--disallowedTools",
         ",".join(
@@ -128,14 +131,20 @@ with stderr_path.open("w") as err:
     reader.start()
     deadline = time.monotonic() + options.timeout_seconds if options.timeout_seconds else None
     end_reason = "finished"
+    next_progress = 0
     try:
         while True:
-            progress.show()
-            remaining = deadline - time.monotonic() if deadline else 5
+            if options.stop_file and options.stop_file.exists():
+                raise KeyboardInterrupt
+            current = time.monotonic()
+            if current >= next_progress:
+                progress.show()
+                next_progress = current + 5
+            remaining = deadline - current if deadline else 5
             if remaining <= 0:
                 raise subprocess.TimeoutExpired(args[0], options.timeout_seconds)
             try:
-                proc.wait(timeout=min(5, remaining))
+                proc.wait(timeout=min(0.5 if options.stop_file else 5, remaining))
             except subprocess.TimeoutExpired:
                 continue
             break
@@ -159,7 +168,11 @@ with stderr_path.open("w") as err:
         raise SystemExit(124)
     except KeyboardInterrupt:
         end_reason = "interrupted"
-        raise
+        try:
+            process_tree.stop_detached_descendants(proc.pid, process_tree.snapshot())
+        except (OSError, subprocess.SubprocessError):
+            pass  # The launcher still terminates the Claude process group below.
+        raise SystemExit(130) from None
     finally:
         try:
             os.killpg(proc.pid, signal.SIGKILL)

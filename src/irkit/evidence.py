@@ -60,14 +60,15 @@ def iter_records(path, kind, encoding="utf-8"):
     if encoding not in ("utf-8", "utf-8-sig", "gb18030", "latin-1", "utf-16", "utf-16-le", "utf-16-be"):
         raise ValueError("Unsupported encoding")
     if kind == "evtx":
-        from Evtx.Evtx import Evtx
+        from evtx import PyEvtxParser
 
-        with Evtx(str(path)) as log:
-            for ordinal, record in enumerate(log.records(), 1):
-                text = record.xml()
-                if len(text.encode()) > MAX_RECORD_BYTES:
-                    raise ValueError(f"EVTX record {ordinal} exceeds size limit")
-                yield ordinal, text
+        # Skipping a parse error would shift every subsequent evidence ordinal.
+        parser = PyEvtxParser(str(path), number_of_threads=1, skip_errors=False)
+        for ordinal, record in enumerate(parser.records(), 1):
+            text = record["data"]
+            if len(text.encode()) > MAX_RECORD_BYTES:
+                raise ValueError(f"EVTX record {ordinal} exceeds size limit")
+            yield ordinal, text
     elif kind in ("text", "gzip"):
         opener = gzip.open if kind == "gzip" else open
         with opener(path, "rt", encoding=encoding, errors="strict", newline="") as stream:
@@ -93,7 +94,7 @@ def iter_records(path, kind, encoding="utf-8"):
         )
 
 
-def initialize_case(source_dir, cases_dir, background=""):
+def initialize_case(source_dir, cases_dir, background="", *, should_stop=None):
     source_dir = Path(source_dir).expanduser().resolve(strict=True)
     cases_dir = Path(cases_dir).expanduser().resolve()
     if not source_dir.is_dir():
@@ -128,6 +129,8 @@ def initialize_case(source_dir, cases_dir, background=""):
                 )
                 dirs.remove(name)
         for name in sorted(files):
+            if should_stop and should_stop():
+                break
             original = Path(directory) / name
             relative = str(original.relative_to(source_dir))
             sid = uid("src")
@@ -143,9 +146,14 @@ def initialize_case(source_dir, cases_dir, background=""):
                     indexer = LineIndex()
                     with destination.open("xb") as writer:
                         while chunk := reader.read(1024 * 1024):
+                            if should_stop and should_stop():
+                                break
                             digest.update(chunk)
                             indexer.feed(chunk)
                             writer.write(chunk)
+                    if should_stop and should_stop():
+                        destination.unlink(missing_ok=True)
+                        break
                     after = os.fstat(reader.fileno())
                     if (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
                         after.st_size,
@@ -179,7 +187,12 @@ def initialize_case(source_dir, cases_dir, background=""):
                 destination.unlink(missing_ok=True)
                 collection = meta["skipped"] if original.is_symlink() else meta["errors"]
                 collection.append({"path": relative, "reason": str(exc)})
+        if should_stop and should_stop():
+            break
     meta["status"] = "ready_with_gaps" if meta["errors"] else "ready"
+    if should_stop and should_stop():
+        meta["status"] = "interrupted"
+        meta["errors"].append({"path": ".", "reason": "用户停止登记；后续日志未复制"})
     (root / "case.json").write_text(dumps(meta), encoding="utf-8")
     return store
 
@@ -240,6 +253,10 @@ def raw_ref(store, ref, *, counts=None):
         raise ValueError("Invalid raw evidence range")
     encoding = ref.get("encoding", "utf-8")
     key = (sid, encoding)
+    if counts is not None and key in counts:
+        if end > counts[key]:
+            raise ValueError("Evidence range exceeds actual source")
+        return sid
     source = store.get(sid, "source")
     if source.get("line_index") and encoding in ("utf-8", "utf-8-sig", "gb18030", "latin-1"):
         if end > source["record_count_lf"]:

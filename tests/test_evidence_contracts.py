@@ -168,7 +168,8 @@ def test_omitting_pending_task_cannot_finalize_report(body_case):
     telemetry.initialize(store)
     telemetry.record(store, "test", {"type": "result", "is_error": False})
     assert assess(store)["status"] == "incomplete"
-    assert "调查未完成" in store.path(progress["path"]).read_text()
+    assert progress["delivery"] == "progress" and not progress["readiness"]["ready"]
+    assert "UNFINISHED_TASK" not in store.path(progress["path"]).read_text()
 
 
 def test_metadata_only_exemption_is_explicit_and_final_delivery_is_rechecked(body_case):

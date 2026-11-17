@@ -11,7 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import decoding, events, evidence, integrity, source_leads, telemetry
+from . import DEFAULT_BUDGET_USD, decoding, events, evidence, integrity, source_leads, telemetry
 from .dispatch import Dispatch
 from .store import Store, dumps
 
@@ -71,7 +71,7 @@ def create_server(case_dir, port=8765):
             ):
                 self.send({"error": "请求来源校验失败，请刷新本地工作台"}, status=403)
                 return
-            if self.path not in ("/api/jobs", "/api/workspace"):
+            if self.path not in ("/api/jobs", "/api/jobs/stop", "/api/workspace"):
                 self.send({"error": "Not found"}, status=404)
                 return
             try:
@@ -87,6 +87,8 @@ def create_server(case_dir, port=8765):
                     raise ValueError("Expected a JSON object")
                 if self.path == "/api/jobs":
                     self.send(dispatch.submit(data), status=202)
+                elif self.path == "/api/jobs/stop":
+                    self.send(dispatch.stop(data.get("job_id"), data.get("project_id")), status=202)
                 else:
                     self.send(
                         dispatch.projects.change(
@@ -179,7 +181,7 @@ def create_server(case_dir, port=8765):
                                 for j in view["jobs"]
                                 if j["visible"] and j["project_id"] == view["project_id"]
                             ]
-                        self.send({**view, "token": token})
+                        self.send({**view, "token": token, "default_budget": DEFAULT_BUDGET_USD})
                     return
                 store = dispatch.case(args.get("case"), args.get("project"))
                 telemetry.initialize(store)
@@ -255,7 +257,33 @@ def create_server(case_dir, port=8765):
                     )
                 elif parsed.path == "/api/report":
                     obj = store.get(args["id"], "report")
-                    self.send({"report": obj, "text": store.path(obj["path"]).read_text()})
+                    part, format_name = args.get("part", "main"), args.get("format", "json")
+                    if part not in {"main", "appendix"} or format_name not in {"json", "markdown", "html"}:
+                        raise ValueError("Unknown report part or format")
+                    key = ("appendix_" if part == "appendix" else "") + (
+                        "html_path" if format_name == "html" else "path"
+                    )
+                    if key not in obj:
+                        raise ValueError(
+                            "This historical report has no separate export for the requested part"
+                        )
+                    path = store.path(obj[key])
+                    if format_name == "json":
+                        self.send({"report": obj, "text": path.read_text(), "part": part})
+                    else:
+                        data = path.read_bytes()
+                        self.send_response(200)
+                        self.send_header(
+                            "Content-Type",
+                            ("text/html" if format_name == "html" else "text/markdown") + "; charset=utf-8",
+                        )
+                        self.send_header("Content-Disposition", f'attachment; filename="{path.name}"')
+                        self.send_header(
+                            "Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'"
+                        )
+                        self.send_header("Content-Length", str(len(data)))
+                        self.end_headers()
+                        self.wfile.write(data)
                 elif parsed.path == "/api/stream":
                     self.send_response(200)
                     self.send_header("Content-Type", "text/event-stream")

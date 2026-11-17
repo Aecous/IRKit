@@ -11,10 +11,11 @@ from typing import Annotated
 
 import typer
 
+from . import DEFAULT_BUDGET_USD
 from .board import case_context, review_card
 from .evidence import initialize_case
 from .store import Store, dumps, review_mode
-from .templates import MAIN, ROLE_TOOLS, ROLES, agent_definitions
+from .templates import MAIN, REPORT_ONLY, ROLE_TOOLS, ROLES, agent_definitions
 
 app = typer.Typer(no_args_is_help=True, help="Claude 原生子 Agent 的本地日志调查工具")
 
@@ -59,11 +60,13 @@ def provider_configuration():
     return provider_env, settings.get("model")
 
 
-def configure_workspace(store):
+def configure_workspace(store, report_only=False):
     workspace = store.root / "workspace"
     (workspace / ".claude/agents").mkdir(parents=True, exist_ok=True)
     mode = review_mode()
-    (workspace / "CLAUDE.md").write_text(MAIN.replace("{@review_mode}", mode), encoding="utf-8")
+    (workspace / "CLAUDE.md").write_text(
+        (REPORT_ONLY if report_only else MAIN).replace("{@review_mode}", mode), encoding="utf-8"
+    )
     config = {
         "mcpServers": {
             "ir": {"command": sys.executable, "args": ["-m", "irkit", "mcp", "--case", str(store.root)]}
@@ -97,8 +100,8 @@ def configure_workspace(store):
     return workspace
 
 
-def launch_arguments(store, model=None, print_mode=False, budget=3.0):
-    workspace = configure_workspace(store)
+def launch_arguments(store, model=None, print_mode=False, budget=DEFAULT_BUDGET_USD, report_only=False):
+    workspace = configure_workspace(store, report_only=report_only)
     executable = shutil.which("claude")
     if not executable:
         raise ValueError("Claude Code CLI not found. Install/login, then irkit resume CASE_DIR")
@@ -112,14 +115,17 @@ def launch_arguments(store, model=None, print_mode=False, budget=3.0):
         "--settings",
         str(workspace / "settings.json"),
         "--tools",
-        "Agent,SendMessage,TaskOutput,TaskStop,AskUserQuestion",
+        "" if report_only else "Agent,SendMessage,TaskOutput,TaskStop,AskUserQuestion",
         "--no-chrome",
         "--disable-slash-commands",
         "--agents",
-        dumps(agent_definitions()),
+        dumps({} if report_only else agent_definitions()),
         "--append-system-prompt",
-        MAIN,
+        REPORT_ONLY if report_only else MAIN,
     ]
+    if report_only:
+        index = args.index("--agents")
+        del args[index : index + 2]
     provider_env, configured_model = provider_configuration()
     if selected_model := model or configured_model:
         args += ["--model", selected_model]
@@ -139,6 +145,10 @@ def launch_arguments(store, model=None, print_mode=False, budget=3.0):
         "从 case_context 读取案件背景和输入。按既定流程使用原生子 Agent 完成有界调查，"
         "把阶段报告保存到本案件 reports。已有任务时先确认交付和未决项，不无故重复数据化。"
     ]
+    if report_only:
+        args[-1] = (
+            "读取当前调查结果，由主 Agent 按五章模板撰写报告，调用 render_report 保存正文与证据附录。不要重新调查。"
+        )
     env = dict(os.environ)
     env.update(provider_env)
     env.update(
@@ -155,12 +165,13 @@ def launch_arguments(store, model=None, print_mode=False, budget=3.0):
             # Propagate the review mode so the ir MCP server (a child process) and the
             # report gates agree with the workflow the main prompt advertises.
             "IRKIT_REVIEW_MODE": review_mode(),
+            "IRKIT_TASK_MODE": "report" if report_only else "investigation",
         }
     )
     return args, env, workspace
 
 
-def launch(store, model=None, print_mode=False, budget=3.0):
+def launch(store, model=None, print_mode=False, budget=DEFAULT_BUDGET_USD):
     args, env, workspace = launch_arguments(store, model, print_mode, budget)
     typer.echo(f"案件：{store.root}\n日志片段将通过 Claude 当前配置的模型服务进行分析。", err=True)
     os.chdir(workspace)
@@ -176,7 +187,7 @@ def investigate(
     prepare_only: bool = False,
     model: str | None = None,
     print_mode: Annotated[bool, typer.Option("--print", help="非交互模式，返回 Claude JSON 输出")] = False,
-    budget: Annotated[float, typer.Option(help="仅 --print 的模型预算美元上限")] = 3.0,
+    budget: Annotated[float, typer.Option(help="仅 --print 的模型预算美元上限")] = DEFAULT_BUDGET_USD,
 ):
     """复制登记日志，生成案件工作区并启动 Claude。背景可为空。"""
     if background and background_file:
@@ -209,7 +220,7 @@ def resume(
     case_dir: Path,
     model: str | None = None,
     print_mode: Annotated[bool, typer.Option("--print")] = False,
-    budget: float = 3.0,
+    budget: float = DEFAULT_BUDGET_USD,
 ):
     """根据持久黑板开启 Claude 会话继续案件。不是外部 Agent 调度器。"""
     try:
@@ -247,7 +258,9 @@ def doctor():
 
     with tempfile.TemporaryDirectory(prefix="irkit-doctor-") as directory:
         result = run_process(
-            [sys.executable, "-I", "-c", "import duckdb; print('local worker ready')"], Path(directory), timeout=10
+            [sys.executable, "-I", "-c", "import duckdb; print('local worker ready')"],
+            Path(directory),
+            timeout=10,
         )
     typer.echo(
         dumps(

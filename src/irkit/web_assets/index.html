@@ -10,11 +10,11 @@
 <dialog id="job-dialog" aria-labelledby="job-title">
 <form id="job-form">
 <div class="dialog-head"><h2 id="job-title">下发日志调查任务</h2><button type="button" id="close-job" aria-label="关闭">×</button></div>
-<p class="form-hint">交给 Claude 主 Agent 完成日志分析、补证与报告。</p>
-<label>所属项目<select id="job-project" required></select></label><label id="job-name-label">调查名称（可选）<input id="job-name" maxlength="120" placeholder="例如：生产环境日志复核"></label><label>任务方式<select id="job-mode"><option value="current">继续指定调查</option><option value="fresh">复用入库数据，重新独立分析</option><option value="new">分析新的日志目录</option></select></label>
+<p id="job-intro" class="form-hint">交给 Claude 主 Agent 完成日志分析、补证与报告。</p>
+<label>所属项目<select id="job-project" required></select></label><label id="job-name-label">调查名称（可选）<input id="job-name" maxlength="120" placeholder="例如：生产环境日志复核"></label><label>任务方式<select id="job-mode"><option value="current">继续指定调查</option><option value="report">基于当前结果生成报告</option><option value="fresh">复用入库数据，重新独立分析</option><option value="new">分析新的日志目录</option></select></label>
 <label id="job-case-label"><span id="job-case-title">继续哪次调查</span><select id="job-case"></select></label><p id="job-source-note" class="form-hint"></p><label id="log-dir-label" hidden>日志目录<input id="job-log-dir" placeholder="/绝对路径/日志目录" autocomplete="off"></label>
-<label>背景与调查目标（可选）<textarea id="job-background" rows="5" maxlength="30000" placeholder="例如：生产和测试环境均出现异常，请定位攻击来源、时间和路径。留空则自主调查。"></textarea></label>
-<div class="form-options"><label>模型预算（美元）<input id="job-budget" type="number" min="0.01" step="0.01" value="8" required></label><label id="analysis-only-label" class="check-label"><input id="job-analysis-only" type="checkbox" checked> 跳过数据初始化</label></div>
+<label><span id="job-background-title">背景与调查目标（可选）</span><textarea id="job-background" rows="5" maxlength="30000" placeholder="例如：生产和测试环境均出现异常，请定位攻击来源、时间和路径。留空则自主调查。"></textarea></label>
+<div class="form-options"><label>模型预算（美元）<input id="job-budget" type="number" min="0.01" step="0.01" value="1000" required></label><label id="analysis-only-label" class="check-label"><input id="job-analysis-only" type="checkbox" checked> 跳过数据初始化</label></div>
 <p id="job-mode-note" class="form-hint">复用当前案件和已入库数据，在新 Claude 会话中继续。</p>
 <p id="job-error" class="form-error" role="alert"></p>
 <div class="dialog-actions"><button type="button" id="cancel-job" class="small">取消</button><button type="submit" id="submit-job" class="primary">启动调查</button></div>

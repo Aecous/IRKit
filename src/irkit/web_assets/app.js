@@ -1,4 +1,4 @@
-import {sourceCardHTML, sourceDetailHTML, sourceTaskHTML, reportHTML} from '/sources.js';
+import {sourceCardHTML, sourceDetailHTML, sourceTaskHTML, reportHTML, reportStatus, deliveryDetailsHTML} from '/sources.js';
 import {agentTree, workspaceUI} from '/workspace.js';
 import {eventCardHTML, eventDetailHTML, eventTitle, integrityHTML, historyHTML, reviewBadge} from '/events.js';
 import {conversation} from '/conversation.js';
@@ -13,12 +13,12 @@ let projectId=new URLSearchParams(location.search).get('project')||'';
 const folded=new Set();
 const caseUrl=path=>path+(path.includes('?')?'&':'?')+'case='+encodeURIComponent(caseId)+'&project='+encodeURIComponent(projectId);
 let control={jobs:[]}, requestId='', posting=false, watchSessionAfter=null;
-const statusNames={idle:'未启动',running:'进行中',completed:'已交付',partial:'阶段报告已保存',pending:'待派发',failed:'失败',candidate:'候选证据',stale:'已过期',draft:'待人工审阅',succeeded:'已处理',ended:'已返回',observed:'最近有活动',incomplete:'未完成交付',interrupted:'已中断'};
+const statusNames={idle:'未启动',running:'进行中',completed:'已交付',partial:'阶段报告已保存',pending:'待派发',failed:'失败',candidate:'候选证据',stale:'已过期',draft:'待人工审阅',generated:'报告已生成',succeeded:'已处理',ended:'已返回',observed:'最近有活动',incomplete:'未完成交付',interrupted:'已中断'};
 const tag=s=>'<span class="tag '+esc(s)+'">'+esc(statusNames[s]||s||'未标记')+'</span>';
 const pretty=v=>typeof v==='string'?v:JSON.stringify(v,null,2);
 async function api(path){const r=await fetch(caseUrl(path));const d=await r.json();if(!r.ok)throw Error(d.error||r.status);return d;}
 function matching(o){return JSON.stringify(o).toLowerCase().includes(el('search').value.toLowerCase());}
-function item(o,body){return '<button class="entry" data-object="'+esc(o.id)+'"><div class="meta">'+tag(o.status)+'<span>'+esc(o.card_type==='observation'?'观察事实':o.card_type==='inference'?'推断':o.kind)+'</span></div><p>'+esc(body)+'</p><code>'+esc(o.id)+'</code></button>';}
+function item(o,body){return '<button class="entry" data-object="'+esc(o.id)+'"><div class="meta">'+(o.kind==='report'?esc(reportStatus(o)):tag(o.status))+'<span>'+esc(o.card_type==='observation'?'观察事实':o.card_type==='inference'?'推断':o.kind)+'</span></div><p>'+esc(body)+'</p><code>'+esc(o.id)+'</code></button>';}
 function transcript(){
  const view=conversation(displayedEvents(),context);
  for(const a of view.agents){
@@ -44,7 +44,7 @@ function render(){
  el('metrics').innerHTML='<span><b>'+(state.counts.card||0)+'</b> 卡片</span><span><b>'+state.objects.filter(o=>['card','link'].includes(o.kind)&&(o.review_state==='needs_review'||o.status==='stale')).length+'</b> 待复核节点/关系</span><span><b>'+(state.counts.report||0)+'</b> 报告</span>';
  el('session-status').innerHTML=!current?'尚无会话':outcome?tag(outcome.status):ending?tag('ended'):tag('running');
  el('run-overview').className=outcome?.status==='completed'?'delivered':ending?'attention':'';
- el('run-overview').innerHTML='<strong>'+(!current?'准备开始日志调查':outcome?.status==='completed'?'综合报告已生成，等待人工审阅':ending?'本轮会话已结束'+(outcome?.status!=='completed'?' · 尚未完成报告交付':''):'调查正在进行')+'</strong><p>'+esc(outcome?.error||(!ending?view.agents.filter(a=>!a.ended&&a.at).map(a=>a.name+'：'+a.last).join(' · '):'可查看会话过程及已经保存的证据'))+'</p>'+(outcome?.report_ids||[]).map(id=>'<button class="small" data-object="'+esc(id)+'">查看报告</button>').join('');
+ el('run-overview').innerHTML='<strong>'+(!current?'准备开始日志调查':outcome?.status==='completed'?(outcome.review_mode==='off'?'快速调查已交付 · 未经独立复核，待人工审阅':'综合报告已交付，待人工审阅'):ending?'本轮会话已结束'+(outcome?.status!=='completed'?' · 尚未完成报告交付':''):'调查正在进行')+'</strong><p>'+esc(outcome?.error||(!ending?view.agents.filter(a=>!a.ended&&a.at).map(a=>a.name+'：'+a.last).join(' · '):'可查看会话过程及已经保存的证据'))+'</p>'+(outcome?.closure_readiness?deliveryDetailsHTML(outcome):'')+(outcome?.report_ids||[]).map(id=>'<button class="small" data-object="'+esc(id)+'">查看报告</button>').join('');
  el('view-context').textContent=tab==='sources'?'本调查全部来源 · 从事件卡聚合已查范围、结果与缺口':(selected?.name||'全部 Agent')+' · 本地时间';
  el('follow-label').hidden=tab!=='run';el('message-filter').hidden=tab!=='run';el('older').hidden=tab!=='run'||!moreHistory();
  el('older').disabled=loading;el('older').textContent=loading?'正在加载…':'↑ 加载更早消息';
@@ -57,7 +57,7 @@ function render(){
   reconcile(el('content'),rows.length?rows.map(o=>({key:o.id,kind:'artifact-row',html:o.kind==='source_view'?sourceCardHTML(o):o.kind==='card'?eventCardHTML(o):item(o,o.statement||o.assessment||o.path)})):[{key:'empty',kind:'empty',html:'当前范围暂无产物'}]);
  }
  const artifacts=state.objects.filter(o=>['card','check','report'].includes(o.kind)&&(!agent||taskArtifacts.has(o.id)||taskIds.has(o.task_id)||taskIds.has(o.followup_task_id)));
- el('artifacts').innerHTML='<div class="artifact-label">'+(agent?'当前 Agent 关联产物':'案件最新产物')+' · 显示 '+Math.min(8,artifacts.length)+' / '+artifacts.length+'</div>'+artifacts.slice(0,8).map(o=>'<button class="artifact" data-object="'+esc(o.id)+'"><span>'+esc(o.kind==='card'?(o.event?'事件卡':'历史文本卡'):o.kind==='report'?'报告':'排查结论')+' · '+esc(statusNames[o.status]||o.status)+'</span><p>'+esc(o.event?.title||o.statement||o.conclusion||o.question||o.assessment||o.id)+'</p></button>').join('');
+ el('artifacts').innerHTML='<div class="artifact-label">'+(agent?'当前 Agent 关联产物':'案件最新产物')+' · 显示 '+Math.min(8,artifacts.length)+' / '+artifacts.length+'</div>'+artifacts.slice(0,8).map(o=>'<button class="artifact" data-object="'+esc(o.id)+'"><span>'+esc(o.kind==='card'?(o.event?'事件卡':'历史文本卡'):o.kind==='report'?'报告':'排查结论')+' · '+esc(o.kind==='report'?reportStatus(o):(statusNames[o.status]||o.status))+'</span><p>'+esc(o.event?.title||o.statement||o.conclusion||o.question||o.assessment||o.id)+'</p></button>').join('');
  if(tab==='run'&&el('follow').checked&&!loading)scroll.scrollTop=scroll.scrollHeight;
  else restoreAnchor(scroll,el('content'),anchor);
  updateLatest();
@@ -89,7 +89,13 @@ async function detail(id){
   else if(ref.dataset_id)html+='<div class="ref">数据行 '+esc(ref.dataset_id)+':'+esc(ref.row_id)+'<button data-object="'+esc(ref.dataset_id)+'">查看数据集</button></div>';
  }
  for(const oid of o.artifact_ids||[])html+='<button class="ref" data-object="'+esc(oid)+'">产物 '+esc(oid)+'</button>';
- if(o.kind==="report"){const report=await api("/api/report?id="+encodeURIComponent(id));html+='<h2>报告正文</h2><div class="report-text">'+reportHTML(report.text)+'</div>';}
+ if(o.kind==="report"){
+ const report=await api("/api/report?id="+encodeURIComponent(id));
+ html+='<h2>'+esc(reportStatus(report.report))+'</h2><details><summary>工作台交付检查</summary>'+deliveryDetailsHTML(report.report)+'</details>';
+ const exportLink=(part,format,label)=>'<a class="small" href="'+esc(caseUrl('/api/report?id='+encodeURIComponent(id)+'&part='+part+'&format='+format))+'" download>'+label+'</a>';
+ html+='<p>'+exportLink('main','markdown','下载正文 Markdown')+(o.html_path?' '+exportLink('main','html','下载正文 HTML'):'')+'</p><div class="report-text">'+reportHTML(report.text,o.evidence_labels,o.template_version)+'</div>';
+ if(o.appendix_path)html+='<details><summary>独立证据附录</summary><p>'+exportLink('appendix','markdown','下载附录 Markdown')+' '+exportLink('appendix','html','下载附录 HTML')+'</p><button class="small" data-report-appendix="'+esc(id)+'">读取证据明细</button><div class="report-text" data-appendix-body></div></details>';
+}
  if(o.history)html+='<h2>修订记录</h2><div class="revision-history">'+historyHTML(o.history,o.id)+'</div>';
  html+='<details><summary>完整记录</summary><pre>'+esc(JSON.stringify(o,null,2))+'</pre></details>';
  el("detail").innerHTML=html;el("detail").dataset.detailObject=id;el("detail").closest(".detail").scrollTop=0;
@@ -128,6 +134,8 @@ async function refresh(){
  lastSessions=JSON.stringify(runs);
 }
 document.addEventListener("click",async e=>{
+ const appendixButton=e.target.closest('[data-report-appendix]');
+ if(appendixButton){appendixButton.disabled=true;try{const result=await api('/api/report?id='+encodeURIComponent(appendixButton.dataset.reportAppendix)+'&part=appendix');appendixButton.parentElement.querySelector('[data-appendix-body]').innerHTML=reportHTML(result.text,result.report.evidence_labels,result.report.template_version);appendixButton.hidden=true;}catch(error){appendixButton.disabled=false;appendixButton.textContent=error.message;}return;}
  const section=e.target.closest('[data-report-section]');if(section){el('detail').querySelector('[data-report-heading="'+section.dataset.reportSection+'"]')?.scrollIntoView({block:'start'});return;}
  const fold=e.target.closest('[data-fold]');if(fold){folded.has(fold.dataset.fold)?folded.delete(fold.dataset.fold):folded.add(fold.dataset.fold);render();return;}
  const hb=e.target.closest('[data-history]');
@@ -200,23 +208,63 @@ async function begin(){
  }catch(e){el("connection").textContent=e.message;setTimeout(begin,3000);}
 }
 const jobLabels={starting:"正在启动",preparing:"正在复制登记日志",running:"Claude 正在调查",completed:"报告已交付",incomplete:"未完成交付",failed:"启动或执行失败",interrupted:"执行已中断"};
+let stoppingJob = null;
+let stopError = '';
 function renderJobs(){
- const j=control.active_job;
- el("jobs").hidden=!j;
- el("jobs").innerHTML=j?'<div class="job-line"><span class="live-dot"></span><strong>'+esc(jobLabels[j.status])+'</strong><span>'+esc(j.investigation_name||'日志调查')+'</span><span>切换项目不会中断运行</span>'+(j.case_id?'<button class="small" data-open-case="'+esc(j.case_id)+'" data-open-project="'+esc(j.project_id)+'">查看运行</button>':'')+'</div>':'';
- el("submit-job").disabled=posting||!!j;
+ const job = control.active_job;
+ const inProject = job && job.project_id === control.project_id;
+ const stopping = job?.stop_requested || stoppingJob === job?.id;
+ const actions = job?.case_id
+  ? '<button class="small" data-open-case="'+esc(job.case_id)+'" data-open-project="'+esc(job.project_id)+'">查看运行</button>' : '';
+ const stop = inProject
+  ? '<button type="button" class="small danger" data-stop-job="'+esc(job.id)+'"'+(stopping?' disabled':'')+'>停止调查</button>' : '';
+ el('jobs').hidden = !job && !stopError;
+ el('jobs').innerHTML = (job ? '<div class="job-line"><span class="live-dot"></span><strong>'
+  +esc(stopping?'正在停止…':job.mode==='report'&&job.status==='running'?'Claude 正在撰写报告':jobLabels[job.status])+'</strong><span>'+esc(job.investigation_name||'日志调查')
+  +'</span>'+actions+stop+'</div>' : '') + (stopError?'<p role="alert" class="job-line danger">'+esc(stopError)+'</p>':'');
+ el('submit-job').disabled = posting || !!job;
+}
+
+async function stopInvestigation(id){
+ const job = control.active_job;
+ if (!job || job.id !== id || job.project_id !== control.project_id || job.stop_requested || stoppingJob) return;
+ if (!window.confirm('停止「'+(job.investigation_name||'日志调查')+'」？已保存的日志和调查产物会保留。')) return;
+ stopError = '';
+ stoppingJob = id;
+ renderJobs();
+ try {
+  const response = await fetch('/api/jobs/stop', {
+   method:'POST', headers:{'Content-Type':'application/json','X-IRKit-Token':control.token},
+   body:JSON.stringify({job_id:id,project_id:job.project_id})
+  });
+  const result = await response.json();
+  if (!response.ok) throw Error(result.error||response.status);
+  if (control.active_job?.id === id) control.active_job = result.stop_requested ? result : null;
+ } catch (error) {
+  stopError = error.message;
+ } finally {
+  stoppingJob = null;
+  renderJobs();
+ }
 }
 
 function jobMode(){
  workspace.jobSources();
- el("job-name-label").hidden=el("job-mode").value==="current";
+ const reportOnly=el("job-mode").value==="report";
+ el("job-title").textContent=reportOnly?"基于当前结果生成报告":"下发日志调查任务";
+ el("job-intro").textContent=reportOnly?"由 Claude 主 Agent 阅读已有结果，撰写报告并保存证据附录。":"交给 Claude 主 Agent 完成日志分析、补证与报告。";
+ el("job-background-title").textContent=reportOnly?"报告侧重点（可选）":"背景与调查目标（可选）";
+ el("job-background").placeholder=reportOnly?"例如：重点讲清初始入口、横向移动及数据收集。留空使用默认五章模板。":"例如：生产和测试环境均出现异常，请定位攻击来源、时间和路径。留空则自主调查。";
+ el("job-name-label").hidden=el("job-mode").value==="current"||reportOnly;
+ el("submit-job").textContent=reportOnly?"生成报告":"启动调查";
  const fresh=el("job-mode").value==="new";
  el("log-dir-label").hidden=!fresh;el("job-log-dir").required=fresh;
- el("analysis-only-label").hidden=fresh||el("job-mode").value==="fresh";
- el("job-mode-note").textContent=fresh?"新建案件并复制登记原始日志；大目录可能需要较长时间和额外磁盘空间。":el("job-mode").value==="fresh"?"复用不可变的入库分区，新建空白事件卡、任务和会话；不继承之前的分析结论。":"使用所选调查已有的事件卡与数据，在新 Claude 会话中继续。";
+ el("analysis-only-label").hidden=reportOnly||fresh||el("job-mode").value==="fresh";
+ el("job-mode-note").textContent=reportOnly?"新建 Claude 主会话，读取所选调查的已有卡片与证据，按五章模板写报告。不重跑调查；报告生成完成不表示调查已全部闭环。":fresh?"新建案件并复制登记原始日志；大目录可能需要较长时间和额外磁盘空间。":el("job-mode").value==="fresh"?"复用不可变的入库分区，新建空白事件卡、任务和会话；不继承之前的分析结论。":"使用所选调查已有的事件卡与数据，在新 Claude 会话中继续。";
 }
 el("new-job").onclick=()=>{
  workspace.prepareJob();
+ el("job-budget").value=String(control.default_budget??1000);
  requestId=crypto.randomUUID();
  el("job-analysis-only").checked=!!state.counts.dataset;
  el("job-error").textContent=!!control.active_job?"已有调查正在执行，结束后可下发下一项。":"";
@@ -235,13 +283,14 @@ el("job-form").onsubmit=async e=>{
    budget:Number(el("job-budget").value),analysis_only:el("job-analysis-only").checked
   })});
   const job=await response.json();if(!response.ok)throw Error(job.error||response.status);
-  if(job.mode==="current")watchSessionAfter=sessions[0]?.run_id||"";
-  el("job-dialog").close();if(job.mode==="current"&&job.case_dir?.split("/").pop()!==caseId){workspace.navigate(job.project_id,job.case_dir.split("/").pop());return;}await workspace.refresh();if(caseId)await refresh();else{control=workspace.data;renderJobs();}
+  if(["current","report"].includes(job.mode))watchSessionAfter=sessions[0]?.run_id||"";
+  el("job-dialog").close();if(["current","report"].includes(job.mode)&&job.case_dir?.split("/").pop()!==caseId){workspace.navigate(job.project_id,job.case_dir.split("/").pop());return;}await workspace.refresh();if(caseId)await refresh();else{control=workspace.data;renderJobs();}
  }catch(error){el("job-error").textContent=error.message;}
  finally{posting=false;renderJobs();}
 };
 document.addEventListener("click",async e=>{
- const b=e.target.closest("[data-open-case],[data-job-log]");if(!b)return;
+ const b=e.target.closest("[data-open-case],[data-job-log],[data-stop-job]");if(!b)return;
+ if(b.dataset.stopJob){await stopInvestigation(b.dataset.stopJob);return;}
  if(b.dataset.openCase){
   if(b.dataset.openCase===control.case_id){if(sessions.length)await selectRun(sessions[0].run_id);}
   else workspace.navigate(b.dataset.openProject||projectId,b.dataset.openCase);

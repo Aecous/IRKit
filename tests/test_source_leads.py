@@ -218,6 +218,9 @@ def content(card, certainty="possible"):
             )
         ],
         recommendations=[dict(text="Verify permission baseline", certainty="unknown", evidence=[])],
+        attack_chains=[], post_exploitation=[], timeline=[],
+        sources=[dict(address="192.0.2.1", role="Observed source",
+                      activity=dict(text="Recorded operation", certainty="possible", evidence=[ref]))],
     )
 
 
@@ -309,8 +312,10 @@ def test_check_attachment_keeps_evidence_and_followup_current(lab):
     assert row["checks"][0]["conclusion"].startswith("Authentication denied")
     report_obj = report.render_report(store, "Progress", [], [], delivery="progress")
     text = store.path(report_obj["path"]).read_text()
-    assert "Authentication denied" in text and "No permission baseline" in text
-    assert check["id"] in text and card["id"] in text
+    # Findings are no longer auto-dumped into an unauthored report.
+    assert "Authentication denied" not in text
+    assert check["id"] not in text and card["id"] not in text
+    assert row["checks"][0]["limitations"] == "No permission baseline"
     store.update(check["id"], {"status": "stale"})
     row = sl.aggregate(store)[0]
     assert not row["checks"][0]["current"] and row["gaps"]
@@ -426,7 +431,8 @@ def test_five_chapter_final_and_current_citations_remain_required(lab):
     text = store.path(result["path"]).read_text()
     headings = [line for line in text.splitlines() if line.startswith("## ")][:5]
     assert [x[3] for x in headings] == list("12345")
-    assert "192.0.2.1" in text and "尚无当前有效的来源行为检查" in text
+    assert "192.0.2.1" in text and "Permission baseline missing" in text
+    assert "尚无当前有效的来源行为检查" not in text
     wrong = content(card)
     wrong["conclusions"][0]["evidence"][0]["revision"] = 0
     with pytest.raises(ValueError, match="current"):

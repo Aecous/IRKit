@@ -1,5 +1,8 @@
 .git
 .venv
+.validation
+.env
+.env.*
 cases
 web-cases
 *.sqlite

@@ -18,3 +18,39 @@ test('report shows chapter navigation, tables, real evidence buttons and folded 
  assert.ok(html.includes('data-object="card_1234567890abcdef"'));assert.ok(html.includes('<details class="report-appendix">'));
  assert.ok(!html.includes('<script>'));assert.ok(!html.includes('<a id='));
 });
+
+test('report delivery, review debt and evidence limits remain distinct',async()=>{
+ const {reportStatus,deliveryDetailsHTML}=await import('../src/irkit/web_assets/sources.js');
+ const report={status:'generated',delivery:'final',review_mode:'off',readiness:{blockers:[],investigation_pending:[],
+ review_pending:[{code:'PARENT_CHANGED',object_id:'card_one',action:'Recheck revision'}],
+ evidence_gaps:[{object_id:'check_one',question:'Transfer?',scope:'host-a UTC',limitations:'Missing <network> logs'}]}};
+ assert.match(reportStatus(report),/最终报告已生成/);
+ assert.match(reportStatus({...report,status:'stale'}),/已过期/);
+ assert.match(reportStatus({...report,delivery:'progress'}),/调查未完成/);
+ const html=deliveryDetailsHTML(report);
+ assert.match(html,/未经独立综合复核/);
+ assert.match(html,/交付阻塞 0 项/);
+ assert.match(html,/修订\/补证待复核 1 项/);
+ assert.match(html,/已记录证据局限 1 项/);
+ assert.match(html,/host-a UTC/);
+ assert.match(html,/&lt;network&gt;/);
+ assert.doesNotMatch(html,/<network>/);
+ assert.match(deliveryDetailsHTML({readiness:{issues:[]}}),/历史检查尚未分类/);
+});
+
+test('narrative report shows new chapters and maps external appendix citations to evidence',()=>{
+ const html=reportHTML('## 1. 事件概述\nObserved [E-001](report_1234567890abcdef.evidence.md#e-001)\n### 2.1 Host chain\nC:\\\\Temp\\\\sample.bin\n[证据明细附录](report_1234567890abcdef.evidence.md)',{'card_1234567890abcdef':'E-001'},2);
+ assert.match(html,/攻击链路/);assert.match(html,/后渗透与影响/);
+ assert.match(html,/data-object="card_1234567890abcdef"/);
+ assert.match(html,/<h3>2.1 Host chain<\/h3>/);
+ assert.match(html,/C:\\Temp\\sample.bin/);
+ assert.doesNotMatch(html,/report_1234567890abcdef.evidence.md/);
+});
+
+test('result-only reports do not imply investigation closure', async()=>{
+ const {reportStatus,deliveryDetailsHTML}=await import('../src/irkit/web_assets/sources.js');
+ const report={status:'generated',delivery:'progress',task_mode:'report',review_mode:'full'};
+ assert.match(reportStatus(report),/现有结果报告/);
+ assert.match(reportStatus(report),/不代表调查闭环/);
+ assert.match(deliveryDetailsHTML(report),/本次仅整理已有结果/);
+});

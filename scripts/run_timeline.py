@@ -7,6 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from irkit import DEFAULT_BUDGET_USD
 from irkit.store import Store, now, uid
 
 
@@ -85,7 +86,7 @@ def main():
     parser.add_argument("case_dir", type=Path)
     parser.add_argument("--ingest-run", required=True)
     parser.add_argument("--background", required=True)
-    parser.add_argument("--budget", type=float, default=8)
+    parser.add_argument("--budget", type=float, default=DEFAULT_BUDGET_USD)
     parser.add_argument("--prepare-only", action="store_true")
     args = parser.parse_args()
     original = Store(args.case_dir)

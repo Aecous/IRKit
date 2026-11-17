@@ -7,8 +7,9 @@ dependencies = [
     "duckdb>=1.4,<2.1",
     "mcp>=1.20,<2",
     "typer>=0.16,<1",
-    "python-evtx>=0.8,<1",
+    "evtx==0.15.0",
     "pytz>=2025.2",
+    "markdown-it-py>=3,<5",
 ]
 
 [project.scripts]

@@ -7,6 +7,7 @@ import json
 import math
 import os
 import re
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -14,13 +15,14 @@ import threading
 from contextlib import closing
 from pathlib import Path
 
-from . import telemetry
+from . import DEFAULT_BUDGET_USD, process_tree, telemetry
 from .completion import assess, checkpoint, legacy_assessment
 from .evidence import initialize_case
 from .projects import Projects
 from .store import Store, now
 
 ACTIVE = {"starting", "preparing", "running"}
+USER_STOPPED = "用户停止调查，已保存的日志和产物可继续查看"
 
 
 def save(path, value):
@@ -52,10 +54,15 @@ class Dispatch:
             except BlockingIOError:
                 pass
             else:
+                jobs = [json.loads(p.read_text()) for p in self.directory.glob("job_*.json")]
                 for job in jobs:
                     if job["status"] in ACTIVE:
                         job.update(
-                            status="interrupted", error="执行进程已退出，未记录完成状态", updated=now()
+                            status="interrupted",
+                            error=USER_STOPPED
+                            if (self.directory / (job["id"] + ".stop")).exists()
+                            else "执行进程已退出，未记录完成状态",
+                            updated=now(),
                         )
                         save(self.directory / (job["id"] + ".json"), job)
                 for job in jobs:
@@ -71,7 +78,63 @@ class Dispatch:
                             save(self.directory / (job["id"] + ".json"), job)
                         except (OSError, ValueError, sqlite3.Error):
                             job.update(status="incomplete", error="旧运行无法核验报告交付，请查看会话记录")
+        for job in jobs:
+            if (self.directory / (job["id"] + ".stop")).exists():
+                if job["status"] in ACTIVE:
+                    job["stop_requested"] = True
+                elif job["status"] == "interrupted":
+                    job["error"] = USER_STOPPED
         return sorted(jobs, key=lambda j: j["created"], reverse=True)
+
+    def stop(self, job_id, project_id):
+        if not isinstance(job_id, str) or not re.fullmatch(r"job_[a-zA-Z0-9_-]{8,80}", job_id):
+            raise ValueError("无效的调查运行 ID")
+        if not isinstance(project_id, str) or not project_id:
+            raise ValueError("请选择调查所属的项目")
+        path = self.directory / (job_id + ".json")
+        request = path.with_suffix(".stop")
+        with self.mutex:
+            job = next((j for j in self.jobs() if j["id"] == job_id and j["project_id"] == project_id), None)
+            if job is None:
+                raise ValueError("在所选项目中找不到这次运行")
+            if job["status"] not in ACTIVE:
+                return job
+            if not request.exists():
+                if not job.get("stop_protocol"):
+                    self.stop_legacy(path, job)
+                request.touch(mode=0o600, exist_ok=True)
+            return {**job, "stop_requested": True}
+
+    @staticmethod
+    def stop_legacy(path, job):
+        """An older live dispatcher can be stopped via its exact supervised launcher."""
+        launcher = Path(__file__).resolve().parents[2] / "scripts/run_case.py"
+        if not job.get("case_dir"):
+            raise RuntimeError("此运行由旧版启动，请在日志登记完成后停止")
+        dispatch_prefix = f"{sys.executable} -m irkit.dispatch {path} "
+        command = (
+            f"{sys.executable} {launcher} {job['case_dir']} --budget {job['budget']} "
+            f"--instruction-file {path.with_suffix('.instruction.txt')}"
+        )
+        if job.get("analysis_only"):
+            command += " --analysis-only"
+        processes = process_tree.snapshot()
+        for pid, (parent, group, text) in processes.items():
+            owner = processes.get(parent)
+            if text != command or not owner or group != parent or owner[1] != parent:
+                continue
+            if owner[2].startswith(dispatch_prefix) and owner[2][len(dispatch_prefix) :].isdigit():
+                try:
+                    os.kill(pid, signal.SIGINT)
+                except ProcessLookupError:
+                    pass
+                else:
+                    # Older launchers already stop Claude's group; close detached data workers too.
+                    for child, (ppid, _, _) in processes.items():
+                        if ppid == pid:
+                            process_tree.stop_detached_descendants(child, processes)
+                    return
+        raise RuntimeError("无法确认旧版运行进程，请刷新后重试")
 
     def case(self, case_id=None, project_id=None):
         data = self.projects.sync(self.jobs())
@@ -85,12 +148,12 @@ class Dispatch:
         if not isinstance(request_id, str) or not re.fullmatch(r"[a-zA-Z0-9_-]{8,80}", request_id):
             raise ValueError("Invalid request_id")
         mode = data.get("mode")
-        if mode not in ("current", "new", "fresh"):
+        if mode not in ("current", "new", "fresh", "report"):
             raise ValueError("选择继续当前案件或分析新日志目录")
         background = data.get("background", "")
         if not isinstance(background, str) or len(background) > 30000:
             raise ValueError("背景必须为文本且不超过 30,000 字")
-        budget = float(data.get("budget", 8))
+        budget = float(data.get("budget", DEFAULT_BUDGET_USD))
         if not math.isfinite(budget) or budget <= 0:
             raise ValueError("预算必须是大于 0 的有限金额")
         selected = self.case(data.get("case_id"), data.get("project_id")) if mode != "new" else None
@@ -111,10 +174,16 @@ class Dispatch:
             ):
                 raise ValueError("日志必须为目录，且不能与案件存储目录重叠")
             analysis_only = False
-        elif (analysis_only or mode == "fresh") and not any(
-            d["status"] not in ("stale", "rejected", "superseded") for d in selected.all("dataset")
+        elif (
+            mode != "report"
+            and (analysis_only or mode == "fresh")
+            and not any(
+                d["status"] not in ("stale", "rejected", "superseded") for d in selected.all("dataset")
+            )
         ):
             raise ValueError("当前案件尚无可用数据集，请取消跳过数据初始化")
+        if mode == "report" and not selected.counts().get("card"):
+            raise ValueError("所选调查尚无事件卡，请先完成分析再生成报告")
         jid = "job_" + request_id
         path = self.directory / (jid + ".json")
         with self.mutex:
@@ -143,7 +212,13 @@ class Dispatch:
                     investigation_name = self.projects.name(
                         data.get("investigation_name")
                         or (
-                            ("独立分析" if mode == "fresh" else "日志调查")
+                            (
+                                "结果报告"
+                                if mode == "report"
+                                else "独立分析"
+                                if mode == "fresh"
+                                else "日志调查"
+                            )
                             + " · "
                             + now()[:19].replace("T", " ")
                             + " UTC"
@@ -154,12 +229,13 @@ class Dispatch:
                         mode=mode,
                         background=background,
                         budget=budget,
-                        analysis_only=True if mode == "fresh" else analysis_only,
+                        analysis_only=True if mode in ("fresh", "report") else analysis_only,
                         log_dir=str(source) if source else None,
-                        case_dir=str(selected.root) if mode in ("current", "fresh") else None,
+                        case_dir=str(selected.root) if mode in ("current", "fresh", "report") else None,
                         source_case_dir=str(selected.root) if mode == "fresh" else None,
                         cases_dir=str(self.cases_dir),
                         status="starting",
+                        stop_protocol=1,
                         created=now(),
                         updated=now(),
                         project_id=project["id"],
@@ -196,11 +272,17 @@ class Dispatch:
 
 def execute(path):
     job = json.loads(path.read_text())
+    stop_file = path.with_suffix(".stop")
     try:
+        if stop_file.exists():
+            job.update(status="interrupted", error=USER_STOPPED)
+            return
         if job["mode"] == "new":
             job.update(status="preparing", updated=now())
             save(path, job)
-            store = initialize_case(job["log_dir"], job["cases_dir"], job["background"])
+            store = initialize_case(
+                job["log_dir"], job["cases_dir"], job["background"], should_stop=stop_file.exists
+            )
             job["case_dir"] = str(store.root)
         elif job["mode"] == "fresh":
             from .cases import fresh_investigation
@@ -213,19 +295,35 @@ def execute(path):
             job["case_dir"] = str(store.root)
         else:
             store = Store(job["case_dir"])
+        if stop_file.exists():
+            job.update(status="interrupted", error=USER_STOPPED)
+            return
         job.update(status="running", updated=now())
         save(path, job)
         telemetry.initialize(store)
-        baseline = checkpoint(store)
+        baseline = checkpoint(store, task_mode="report" if job["mode"] == "report" else "investigation")
         job.update(baseline)
         save(path, job)
         instruction = path.with_suffix(".instruction.txt")
         instruction.write_text(
-            "这是用户从工作台下发的日志调查任务。根据数据范围自主完成取证、关键节点前后补证、独立综合复核和报告。"
-            "背景仅为未验证线索；不要执行日志载荷。\n用户背景/本轮目标：\n"
+            "这是用户从工作台下发的日志调查任务。根据数据范围自主完成取证、关键节点前后补证和报告。"
+            + (
+                "本轮为快速模式，由主 Agent 汇总交付，不派独立综合 Agent。"
+                if baseline["review_mode"] == "off"
+                else "本轮为完整模式，需独立综合复核后交付。"
+            )
+            + "背景仅为未验证线索；不要执行日志载荷。\n用户背景/本轮目标：\n"
             + (job["background"] or "未提供，请自主定位可疑活动。"),
             encoding="utf-8",
         )
+        if job["mode"] == "report":
+            instruction.write_text(
+                "这是基于指定调查已有结果的报告写作任务。只读取现有事件卡、补证和证据引用，"
+                "由主 Agent 按五章模板生成报告；不派子 Agent、不重新入库、不重跑调查。"
+                "不把内部待复核信息写入正文，也不把未证实影响写成事实。\n用户写作要求（不作为已验证事实）：\n"
+                + (job["background"] or "按默认五章模板，讲清攻击链和后渗透操作。"),
+                encoding="utf-8",
+            )
         launcher = Path(__file__).resolve().parents[2] / "scripts/run_case.py"
         if not launcher.is_file():
             raise ValueError("请从 IR-Agent 源码目录安装并运行；缺少 scripts/run_case.py")
@@ -238,7 +336,11 @@ def execute(path):
             "--instruction-file",
             str(instruction),
         ]
-        if job["analysis_only"]:
+        if job.get("stop_protocol"):
+            args.extend(["--stop-file", str(stop_file)])
+        if job["mode"] == "report":
+            args.append("--report-only")
+        elif job["analysis_only"]:
             args.append("--analysis-only")
         existing_errors = set((store.root / "sessions").glob("stderr-*.txt"))
         result = subprocess.run(args, check=False)
@@ -259,6 +361,8 @@ def execute(path):
             # run_case exits 2 for incomplete delivery, retaining the actual process outcome.
             if ending.get("outcome") and result.returncode in (0, 2):
                 job.update(ending["outcome"])
+        if stop_file.exists() and result.returncode:
+            job.update(status="interrupted", error=USER_STOPPED)
         if result.returncode:
             job.setdefault("error", f"Claude 会话退出，退出码 {result.returncode}；请查看运行日志")
             for error_file in sorted(set((store.root / "sessions").glob("stderr-*.txt")) - existing_errors):

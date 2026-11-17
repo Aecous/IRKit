@@ -13,7 +13,12 @@ from irkit import telemetry
 
 @pytest.mark.parametrize(
     "mode,code,status",
-    [("complete", 0, "completed"), ("stopped", 2, "incomplete"), ("timeout", 124, "interrupted")],
+    [
+        ("complete", 0, "completed"),
+        ("fast", 0, "completed"),
+        ("stopped", 2, "incomplete"),
+        ("timeout", 124, "interrupted"),
+    ],
 )
 def test_launcher_lifecycle(case, tmp_path, mode, code, status):
     binary = tmp_path / "claude"
@@ -31,6 +36,9 @@ store=Store(Path.cwd().parent)
 mode=os.environ['IRKIT_TEST_MODE']
 if mode=='timeout':
     time.sleep(20)
+elif mode=='fast':
+    from irkit.report import render_report
+    render_report(store, 'Synthetic bounded report', [], [])
 elif mode=='complete':
     (store.root/'reports/test.md').write_text('Synthetic report')
     r=store.put('report',dict(path='reports/test.md',status='draft'))
@@ -50,6 +58,7 @@ print(json.dumps(dict(type='result',is_error=False)),flush=True)
         "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
         "CLAUDE_CONFIG_DIR": str(config),
         "IRKIT_TEST_MODE": mode,
+        "IRKIT_REVIEW_MODE": "off" if mode == "fast" else "full",
     }
     command = [
         sys.executable,
@@ -66,5 +75,8 @@ print(json.dumps(dict(type='result',is_error=False)),flush=True)
     if mode == "stopped":
         assert session["ending"]["exit_code"] == 0
         assert session["ending"]["outcome"]["stopped_agent_ids"] == ["child"]
-    if mode == "complete":
+    if mode in ("complete", "fast"):
         assert json.loads((case.root / "sessions/response-1.json").read_text())["is_error"] is False
+    if mode == "fast":
+        assert session["ending"]["outcome"]["review_mode"] == "off"
+        assert not session["ending"]["outcome"]["synthesis_task_ids"]

@@ -1,7 +1,7 @@
 """Small evidence contracts, not an Agent scheduler or a natural-language truth checker."""
 
 from .integrity import delivery_issues, disposed, parent_changed, pending
-from .store import dumps
+from .store import dumps, review_mode
 
 INVALID = {"stale", "rejected", "superseded"}
 
@@ -117,6 +117,14 @@ def task_readiness(store, task_id, artifact_ids=None):
             }
         )
     for check in checks:
+        if check.get("outcome") == "incomplete":
+            issues.append(
+                dict(
+                    code="CHECK_INCOMPLETE",
+                    object_id=check["id"],
+                    action="Finish the recorded investigation or deliver a progress report",
+                )
+            )
         for snapshot in check.get("body_evidence", []):
             run = store.get(snapshot["id"], "run")
             if run["revision"] != snapshot["revision"] or run["status"] != "succeeded":
@@ -130,7 +138,40 @@ def task_readiness(store, task_id, artifact_ids=None):
     return {"task_id": task_id, "ready": not issues, "issues": issues}
 
 
-def closure_readiness(store):
+REVIEW_CODES = {
+    "EVIDENCE_REVIEW_PENDING",
+    "STALE_ARTIFACT",
+    "PARENT_CHANGED",
+    "FOLLOWUP_UNREVIEWED",
+    "BODY_EVIDENCE_CHANGED",
+}
+
+
+def classify_issues(issues, mode):
+    """Only an explicit review allowlist is advisory in fast mode; unknown codes block."""
+    unique = {}
+    for issue in issues:
+        unique.setdefault(dumps(issue), issue)
+    rows = []
+    for issue in unique.values():
+        review = (
+            issue["code"] in REVIEW_CODES
+            and not (issue["code"] == "STALE_ARTIFACT" and issue.get("kind") not in {"card", "check", "link"})
+        ) or (
+            issue["code"] == "EVENT_QUESTION_OPEN"
+            and issue.get("state") in {"needs_review", "awaiting_review", "stale"}
+        )
+        rows.append(
+            {
+                **issue,
+                "category": "review_pending" if review else "investigation_pending",
+                "blocking": not (mode == "off" and review),
+            }
+        )
+    return rows
+
+
+def closure_readiness(store, mode=None):
     """Check case-wide work, including tasks omitted from synthesis inputs."""
     issues = delivery_issues(store)
     if any(task.get("event_policy_version", 0) >= 4 for task in store.all("task")):
@@ -218,7 +259,36 @@ def closure_readiness(store):
                     "action": "Resume decode_batch or deliver a progress report with unfinished coverage",
                 }
             )
-    return {"ready": not issues, "issues": issues}
+    mode = mode or review_mode()
+    issues = classify_issues(issues, mode)
+    blockers = [issue for issue in issues if issue["blocking"]]
+    # These are recorded limits of completed checks, not automatic assertions that
+    # evidence is absent. Superseded checks belong to review debt, never current gaps.
+    evidence_gaps = [
+        dict(
+            object_id=c["id"],
+            question=c["question"],
+            scope=c["scope"],
+            outcome=c["outcome"],
+            limitations=c["limitations"],
+        )
+        for c in store.all("check")
+        if c.get("status") not in INVALID
+        and not pending(c)
+        and c.get("limitations")
+        and c.get("outcome") != "incomplete"
+        and (not c.get("task_id") or store.get(c["task_id"], "task")["status"] == "completed")
+    ]
+    return {
+        "ready": not blockers,
+        "review_mode": mode,
+        "issues": issues,
+        "blockers": blockers,
+        "review_pending": [issue for issue in issues if issue["category"] == "review_pending"],
+        "investigation_pending": [issue for issue in issues if issue["category"] == "investigation_pending"],
+        "warnings": [issue for issue in issues if not issue["blocking"]],
+        "evidence_gaps": evidence_gaps,
+    }
 
 
 def require_ready(result):

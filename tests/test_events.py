@@ -119,7 +119,8 @@ def test_event_question_requires_dispatch_and_independent_review(case, dataset):
     )
     assert events.event_queue(case)["total"] == 0
     rendered = report.render_report(case, "Change observed; cause unknown", [], [])
-    assert "可能前因（假设）" in case.path(rendered["path"]).read_text()
+    assert "Change observed; cause unknown" in case.path(rendered["path"]).read_text()
+    assert "可能前因（假设）" not in case.path(rendered["path"]).read_text()
     assert (
         next(o for o in snapshot(case)["objects"] if o["id"] == card["id"])["investigation"]["upstream"][
             "state"

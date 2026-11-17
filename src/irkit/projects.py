@@ -218,6 +218,7 @@ class Projects:
                 ]
                 item.update(
                     dataset_count=len(ds),
+                    card_count=store.counts().get("card", 0),
                     row_count=sum(d.get("row_count", 0) for d in ds),
                     data_versions=[
                         dict(
@@ -227,13 +228,16 @@ class Projects:
                     ],
                 )
             except (OSError, ValueError):
-                item.update(dataset_count=0, row_count=0, data_versions=[], unavailable=True)
+                item.update(dataset_count=0, card_count=0, row_count=0, data_versions=[], unavailable=True)
             attached = [
                 j
                 for j in jobs
                 if data["runs"].get(j["id"], {}).get("case_id") == c["id"] and self.visible_run(data, j["id"])
             ]
-            item["latest_status"] = attached[0]["status"] if attached else "idle"
+            investigations_only = [j for j in attached if j.get("mode") != "report"]
+            item["latest_status"] = investigations_only[0]["status"] if investigations_only else "idle"
+            report_jobs = [j for j in attached if j.get("mode") == "report"]
+            item["latest_report_status"] = report_jobs[0]["status"] if report_jobs else None
             item["active"] = any(
                 j["status"] in ACTIVE
                 for j in jobs

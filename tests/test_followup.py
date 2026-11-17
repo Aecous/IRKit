@@ -53,16 +53,9 @@ def test_followup_requires_linked_artifacts_and_synthesis_review(case, dataset):
         report.render_report(case, "Premature final", [], [])
     artifact = report.render_report(case, "Request observed", [], [], delivery="progress")
     content = case.path(artifact["path"]).read_text()
-    for value in (
-        parent["id"],
-        tid,
-        "Two synthetic rows",
-        "Backend audit missing",
-        run["id"],
-        "仍需补证",
-        sid,
-    ):
-        assert value in content
+    assert tid not in content and sid not in content
+    assert any(i["code"] == "FOLLOWUP_NEEDS_EVIDENCE" for i in artifact["readiness"]["blockers"])
+    assert case.get(check["id"])["limitations"] == "Backend audit missing"
     board.review_followup(
         case, tid, sid, "supported", "Bounded HTTP observation supported; no claim of application success"
     )
@@ -78,7 +71,8 @@ def test_followup_requires_linked_artifacts_and_synthesis_review(case, dataset):
     historical = report.render_report(
         case, "Historical task needs fresh investigation", [], [], delivery="progress"
     )
-    assert "起点卡片已变更，需重新补证" in case.path(historical["path"]).read_text()
+    assert any(i["code"] == "PARENT_CHANGED" for i in historical["readiness"]["review_pending"])
+    assert "PARENT_CHANGED" not in case.path(historical["path"]).read_text()
 
 
 def test_followup_negative_check_and_wrong_task_rejected(case, dataset):

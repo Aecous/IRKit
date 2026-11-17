@@ -33,7 +33,7 @@ export function workspaceUI({api, onChange}){
   el('workspace-error').textContent='';
   el('workspace-title').textContent='调查与运行记录';
   const rows=cases(data.project_id);
-  el('workspace-content').innerHTML='<p class="form-hint">调查保留独立事件卡和报告。删除移入回收站，原始日志与入库数据保留。</p>'+ (rows.map(c=>'<section class="history-case"><div class="history-title"><button data-navigate="'+esc(c.id)+'"><strong>'+esc(c.name)+'</strong></button><span>'+c.dataset_count+' 个数据集 · '+Number(c.row_count).toLocaleString()+' 行</span><button class="small" data-rename="'+esc(c.id)+'" data-kind="investigation">重命名</button><button class="small danger" data-trash="'+esc(c.id)+'" data-kind="investigation" '+(c.active?'disabled':'')+'>删除调查</button></div>'+data.jobs.filter(j=>j.case_id===c.id&&j.visible).map(j=>'<div class="history-run"><span>'+esc(new Date(j.created).toLocaleString('zh-CN'))+'</span><span>'+esc(['starting','preparing','running'].includes(j.status)?jobLabels[j.status]:j.status==='failed'?'执行失败':j.status==='interrupted'?'已中断':'运行结束')+'</span><span class="tag '+esc(j.status)+'">'+esc(j.status==='completed'?'报告已交付':'报告未交付')+'</span><button class="small" data-job-log="'+esc(j.id)+'">日志</button><button class="small danger" data-trash="'+esc(j.id)+'" data-kind="run" '+(['starting','preparing','running'].includes(j.status)?'disabled':'')+'>删除记录</button></div>').join('')+'</section>').join('')||'<div class="empty">项目中还没有调查，点击“下发调查任务”添加日志。</div>');
+  el('workspace-content').innerHTML='<p class="form-hint">调查保留独立事件卡和报告。删除移入回收站，原始日志与入库数据保留。</p>'+ (rows.map(c=>'<section class="history-case"><div class="history-title"><button data-navigate="'+esc(c.id)+'"><strong>'+esc(c.name)+'</strong></button><span>'+c.dataset_count+' 个数据集 · '+Number(c.row_count).toLocaleString()+' 行</span><button class="small" data-rename="'+esc(c.id)+'" data-kind="investigation">重命名</button><button class="small danger" data-trash="'+esc(c.id)+'" data-kind="investigation" '+(c.active?'disabled':'')+'>删除调查</button></div>'+data.jobs.filter(j=>j.case_id===c.id&&j.visible).map(j=>'<div class="history-run"><span>'+esc(new Date(j.created).toLocaleString('zh-CN'))+'</span><span>'+esc(['starting','preparing','running'].includes(j.status)?jobLabels[j.status]:j.status==='failed'?'执行失败':j.status==='interrupted'?'已中断':'运行结束')+'</span><span class="tag '+esc(j.status)+'">'+esc(j.mode==='report'?(j.status==='completed'?'结果报告已生成':'结果报告未生成'):j.status==='completed'?'报告已交付':'报告未交付')+'</span><button class="small" data-job-log="'+esc(j.id)+'">日志</button><button class="small danger" data-trash="'+esc(j.id)+'" data-kind="run" '+(['starting','preparing','running'].includes(j.status)?'disabled':'')+'>删除记录</button></div>').join('')+'</section>').join('')||'<div class="empty">项目中还没有调查，点击“下发调查任务”添加日志。</div>');
   const unattached=data.jobs.filter(j=>j.project_id===data.project_id&&!j.case_id&&j.visible);
   if(unattached.length)el('workspace-content').insertAdjacentHTML('beforeend','<h3>尚未建立调查的运行</h3>'+unattached.map(j=>'<div class="history-run"><span>'+esc(j.investigation_name||j.id)+'</span><span>'+esc(jobLabels[j.status])+'</span><button class="small" data-job-log="'+esc(j.id)+'">日志</button><button class="small danger" data-trash="'+esc(j.id)+'" data-kind="run" '+(['starting','preparing','running'].includes(j.status)?'disabled':'')+'>删除记录</button></div>').join(''));
   el('workspace-dialog').showModal();
@@ -67,13 +67,13 @@ export function workspaceUI({api, onChange}){
  });
  function jobSources(){
   const pid=el('job-project').value, mode=el('job-mode').value;
-  const list=cases(pid).filter(c=>mode!=='fresh'||c.dataset_count>0), previous=el('job-case').value;
-  el('job-case').innerHTML=list.map(c=>'<option value="'+esc(c.id)+'">'+esc(c.name)+' · '+c.dataset_count+' 数据集 / '+Number(c.row_count).toLocaleString()+' 行</option>').join('');
+  const list=cases(pid).filter(c=>mode==='report'?c.card_count>0:mode!=='fresh'||c.dataset_count>0), previous=el('job-case').value;
+  el('job-case').innerHTML=list.map(c=>'<option value="'+esc(c.id)+'">'+esc(c.name)+' · '+(mode==='report'?c.card_count+' 张事件卡':c.dataset_count+' 数据集 / '+Number(c.row_count).toLocaleString()+' 行')+'</option>').join('');
   el('job-case').value=list.some(c=>c.id===previous)?previous:list.some(c=>c.id===data.case_id)?data.case_id:list[0]?.id||'';
   el('job-case-label').hidden=mode==='new';el('job-case').required=mode!=='new';
-  el('job-case-title').textContent=mode==='fresh'?'复用哪次调查的入库数据':'继续哪次调查';
+  el('job-case-title').textContent=mode==='report'?'使用哪次调查的结果':mode==='fresh'?'复用哪次调查的入库数据':'继续哪次调查';
   const source=list.find(c=>c.id===el('job-case').value);
-  el('job-source-note').textContent=mode==='new'?'新日志将归入所选项目。':source?'固定使用该调查当前的 '+source.dataset_count+' 个可用数据集；提交后不会自动切换来源。':'该项目没有可用调查，请选择“分析新的日志目录”。';
+  el('job-source-note').textContent=mode==='new'?'新日志将归入所选项目。':mode==='report'?(source?'读取该调查的 '+source.card_count+' 张现有事件卡及关联证据。':'该项目暂无有事件卡的调查，请先完成日志分析。'):source?'固定使用该调查当前的 '+source.dataset_count+' 个可用数据集；提交后不会自动切换来源。':'该项目没有可用调查，请选择“分析新的日志目录”。';
  }
  el('job-project').onchange=jobSources;el('job-case').onchange=jobSources;
  function prepareJob(){el('job-project').innerHTML=visibleProjects().map(p=>'<option value="'+esc(p.id)+'">'+esc(p.name)+'</option>').join('');el('job-project').value=data.project_id||'';if(!cases(data.project_id).length)el('job-mode').value='new';jobSources();}

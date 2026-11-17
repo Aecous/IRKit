@@ -22,11 +22,37 @@ export function sourceTaskHTML(t){
  if(r){html+='<h3>实际检查的行为</h3>'+r.behavior_categories.map(b=>'<div class="source-event"><strong>'+esc(b.behavior)+'</strong><p>'+esc(b.conclusion)+'</p>'+b.check_ids.map(id=>ref(id,'查看排查记录')).join('')+'</div>').join('')+'<p>证据缺口：'+esc(r.limitations)+'</p><p>综合复核：'+esc(t.source_review?.verdict==='supported'?'支持有界结论':t.source_review?.verdict==='needs_more_evidence'?'仍需补证':'尚未复核')+'</p>';}
  return html+'</section>';
 }
-function inline(s){
+function inline(s, labels={}){
  const plain=s.replace(/<br>/g,' ').replace(/&(amp|lt|gt|quot|#x27|#39|#96|#124);/g,(_,k)=>({amp:'&',lt:'<',gt:'>',quot:'"','#x27':"'",'#39':"'",'#96':'`','#124':'|'}[k]));
- return esc(plain).replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>').replace(/`([^`]+)`/g,'<code>$1</code>').replace(/\[(E-\d+)\]\(#evidence-((?:card|check|link)_[a-f0-9]{16})\)/g,'<button class="report-citation" data-object="$2">$1</button>');
+ return esc(plain).replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>').replace(/`([^`]+)`/g,'<code>$1</code>').replace(/\[(E-\d+)\]\(#evidence-((?:card|check|link)_[a-f0-9]{16})\)/g,'<button class="report-citation" data-object="$2">$1</button>')
+ .replace(/\[(E-\d+)\]\(report_[a-f0-9]{16}\.evidence\.md#e-\d+\)/g,(_,label)=>{const id=Object.keys(labels).find(id=>labels[id]===label);return id?'<button class="report-citation" data-object="'+esc(id)+'">'+label+'</button>':label;})
+ .replace(/\[证据明细附录\]\(report_[a-f0-9]{16}\.evidence\.md\)/g,'证据明细见下方独立附录。')
+ .replace(/\\([\\`*_{}\[\]#|])/g,'$1');
 }
-export function reportHTML(text){
+export function reportStatus(o){
+ if(o.status==='stale')return '报告已过期，需重新生成';
+ if(o.task_mode==='report')return '现有结果报告 · 不代表调查闭环';
+ if(o.delivery==='progress')return '阶段报告 · 调查未完成';
+ if(o.status==='generated')return '最终报告已生成 · 待人工审阅';
+ return '历史报告 · 待人工审阅';
+}
+export function deliveryDetailsHTML(o){
+ const r=o.readiness||o.closure_readiness;
+ const mode=o.review_mode||r?.review_mode;
+ let html=o.task_mode==='report'?'<p>本次仅整理已有结果；下方为调查本身的交付检查，不影响写作任务的完成状态。</p>':'';
+ html+='<p>'+esc(mode==='off'?'快速模式 · 未经独立综合复核':mode==='full'?'完整模式 · 要求独立综合复核':'历史记录 · 未记录复核模式')+'</p>';
+ if(!r)return html;
+ if(!r.blockers)return html+'<p>历史检查尚未分类，请查看原始记录；不自动判为已完成。</p>';
+ html+='<p>交付阻塞 '+r.blockers.length+' 项 · 修订/补证待复核 '+(r.review_pending||[]).length+' 项 · 已记录证据局限 '+(r.evidence_gaps||[]).length+' 项。待复核不等于原始日志缺失。</p>';
+ for(const [key,title] of [['investigation_pending','尚未完成的调查'],['review_pending','卡片修订与补证待复核'],['evidence_gaps','已查范围的证据局限']]){
+  const rows=r[key]||[];
+  html+='<details><summary>'+title+'（'+rows.length+'）</summary>';
+  for(const row of rows)html+='<section class="source-event">'+(row.object_id?ref(row.object_id):'')+'<p>'+esc(row.question||row.code||'')+'</p><p>'+esc(row.scope||'')+'</p><p>'+esc(row.limitations||row.action||'')+'</p></section>';
+  html+='</details>';
+ }
+ return html;
+}
+export function reportHTML(text, labels={}, templateVersion=1){
  const lines=text.split('\n');let html='',table=false,code=false,appendix=false;
  for(const line of lines){
   if(line.startsWith('```')){if(code){html+='</pre>';code=false;}else{html+='<pre>';code=true;}continue;}
@@ -35,14 +61,14 @@ export function reportHTML(text){
   if(line.startsWith('|')){
    if(/^\|[\s:|\-]+\|$/.test(line))continue;
    if(!table){html+='<div class="report-table-wrap"><table>';table=true;}
-   html+='<tr>'+line.split('|').slice(1,-1).map(c=>'<td>'+inline(c.trim())+'</td>').join('')+'</tr>';continue;
+   html+='<tr>'+line.split('|').slice(1,-1).map(c=>'<td>'+inline(c.trim(),labels)+'</td>').join('')+'</tr>';continue;
   }
   if(table){html+='</table></div>';table=false;}
   if(line.startsWith('## 附录')){html+='<details class="report-appendix"><summary>展开证据与调查记录附录</summary>';appendix=true;continue;}
-  if(/^## [1-5]\. /.test(line)){const n=line[3];html+='<h2 data-report-heading="'+n+'">'+inline(line.slice(3))+'</h2>';continue;}
-  if(/^#{1,4} /.test(line)){html+='<h3>'+inline(line.replace(/^#{1,4} /,''))+'</h3>';continue;}
-  html+=line?'<p>'+inline(line)+'</p>':'';
+  if(/^## [1-5]\. /.test(line)){const n=line[3];html+='<h2 data-report-heading="'+n+'">'+inline(line.slice(3),labels)+'</h2>';continue;}
+  if(/^#{1,4} /.test(line)){const depth=line.match(/^#+/)[0].length;html+='<h'+depth+'>'+inline(line.replace(/^#{1,4} /,''),labels)+'</h'+depth+'>';continue;}
+  html+=line?'<p>'+inline(line,labels)+'</p>':'';
  }
  if(table)html+='</table></div>';if(code)html+='</pre>';if(appendix)html+='</details>';
- return '<div class="report-chapters">'+['背景与范围','结论与影响','时间线与路径','来源与行为','缺口与建议'].map((t,i)=>'<button class="small" data-report-section="'+(i+1)+'">'+(i+1)+'. '+t+'</button>').join('')+'</div>'+html;
+ return '<div class="report-chapters">'+(templateVersion>=2?['事件概述','攻击链路','后渗透与影响','时间线与来源','局限与建议']:['背景与范围','结论与影响','时间线与路径','来源与行为','缺口与建议']).map((t,i)=>'<button class="small" data-report-section="'+(i+1)+'">'+(i+1)+'. '+t+'</button>').join('')+'</div>'+html;
 }

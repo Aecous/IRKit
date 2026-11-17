@@ -4,7 +4,9 @@ import hashlib
 import json
 import sys
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from time import monotonic
 
 import duckdb
 
@@ -72,6 +74,57 @@ def run_transform(store, source_ids, code, timeout=0):
     return store.update(rid, {**outcome, "finished": now()})
 
 
+def run_transform_batches(
+    store, batches, code, description, field_notes, quality, query_examples, workers=2, timeout=0
+):
+    if type(workers) is not int or not 1 <= workers <= 4:
+        raise ValueError("Choose 1 to 4 concurrent conversion processes")
+    if type(timeout) is not int or timeout < 0:
+        raise ValueError("Timeout must be a nonnegative integer; 0 means no deadline")
+    if not batches or any(not batch for batch in batches) or len(code.encode()) > 256_000:
+        raise ValueError("Nonempty batches required; code limit is 256KB")
+    source_ids = [sid for batch in batches for sid in batch]
+    if len(set(source_ids)) != len(source_ids):
+        raise ValueError("Every source must belong to exactly one submitted batch")
+    if not description.strip() or not field_notes or not quality.strip():
+        raise ValueError("Description, field notes, and honest quality notes are required")
+    for sid in source_ids:
+        store.get(sid, "source")
+
+    def convert(batch):
+        start = monotonic()
+        run = run_transform(store, batch, code, timeout)
+        return run, round(monotonic() - start, 3)
+
+    results = [None] * len(batches)
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        pending = {executor.submit(convert, batch): i for i, batch in enumerate(batches)}
+        for future in as_completed(pending):
+            i = pending[future]
+            result = {"batch": i + 1, "sources": batches[i]}
+            results[i] = result
+            try:
+                run, seconds = future.result()
+            except Exception as exc:
+                result.update(status="transform_failed", error=str(exc))
+                continue
+            result.update(run_id=run["id"], transform_seconds=seconds)
+            if run["status"] != "succeeded":
+                result.update(
+                    status=run["status"], error=run.get("error") or run.get("stderr_tail") or ""
+                )
+                continue
+            start = monotonic()
+            try:
+                dataset = publish_dataset(store, run["id"], description, field_notes, quality, query_examples)
+            except Exception as exc:
+                result.update(status="publish_failed", error=str(exc))
+            else:
+                result.update(status="published", dataset_id=dataset["id"], row_count=dataset["row_count"])
+            result["publish_seconds"] = round(monotonic() - start, 3)
+    return {"workers": workers, "batches": results}
+
+
 def publish_dataset(store, run_id, description, field_notes, quality, query_examples):
     run = store.get(run_id, "run")
     if run.get("operation") != "transform" or run["status"] != "succeeded":
@@ -85,6 +138,7 @@ def publish_dataset(store, run_id, description, field_notes, quality, query_exam
     directory = store.root / "datasets" / did
     directory.mkdir()
     counts, fields, row_count = {}, set(), 0
+    approved_sources = set(run["sources"])
     ranges, overflow = defaultdict(list), set()
     try:
         with output.open() as source, (directory / "rows.jsonl").open("w") as target:
@@ -95,7 +149,7 @@ def publish_dataset(store, run_id, description, field_notes, quality, query_exam
                 if not isinstance(row, dict) or not isinstance(row.get("_refs"), list) or not row["_refs"]:
                     raise ValueError("Every row needs a nonempty _refs list")
                 for ref in row["_refs"]:
-                    if ref.get("source_id") not in run["sources"]:
+                    if ref.get("source_id") not in approved_sources:
                         raise ValueError("Reference is outside approved run sources")
                     raw_ref(store, ref, counts=counts)
                     key = (ref["source_id"], ref.get("encoding", "utf-8"))

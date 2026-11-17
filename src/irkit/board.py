@@ -584,6 +584,35 @@ def supersede_dataset(store, dataset_id, replacement_id, reason):
     )
 
 
+def report_case_context(store, background_offset=0):
+    """Small report-writing index; inventories remain available through list_objects."""
+    if background_offset < 0:
+        raise ValueError("background_offset must be nonnegative")
+    meta = case_metadata(store)
+    background = meta.get("background", "")
+    end = min(background_offset + 2000, len(background))
+    statuses = {}
+    for card in store.all("card"):
+        state = card.get("status", "unknown")
+        statuses[state] = statuses.get(state, 0) + 1
+    return {
+        "case": {key: meta[key] for key in ("id", "created", "background_status") if key in meta},
+        "background": background[background_offset:end],
+        "background_offset": background_offset,
+        "next_background_offset": end if end < len(background) else None,
+        "counts": store.counts(),
+        "card_status_counts": statuses,
+        "task_mode": "report",
+        "review_mode": review_mode(),
+        "page_note": (
+            "This is an index, not the evidence. Inventories and internal closure checks are omitted. "
+            "Read all pages of list_objects(card/link/check/input_gap), following next_offset; "
+            "use get_object(fields=[...]) for details. Read additional background via "
+            "case_context(background_offset=next_background_offset). Do not rerun investigation."
+        ),
+    }
+
+
 def case_context(store):
     # Bounded overview; large inventories are fetched through explicit pagination.
     meta = case_metadata(store)

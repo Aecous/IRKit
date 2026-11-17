@@ -309,8 +309,10 @@ def test_concurrent_writes_context_and_report(case):
     assert len(case.get(context["manifest_id"])["returned"]) == 5
     report = render_report(case, "Unverified observations", ["missing host audit"], ["need more logs"])
     text = case.path(report["path"]).read_text()
-    assert "candidate" in text and "尚未数据化" in text
-    assert all(card["id"] in text for card in cards)
+    assert "candidate" not in text
+    assert "尚未数据化" in case.path(report["appendix_path"]).read_text()
+    assert all(card["id"] not in text for card in cards)
+    assert all(card["id"] in {x["id"] for x in report["snapshot"]} for card in cards)
     board.review_card(case, cards[0]["id"], 1, "reviewed", "Checked original source manually")
     assert case.get(cards[0]["id"])["status"] == "reviewed"
 

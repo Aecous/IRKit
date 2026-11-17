@@ -304,7 +304,9 @@ def test_new_delivery_requires_review_and_retains_all_claims(audit):
     )
     out = report.render_report(case, "Bounded observation", [], [])
     text = case.path(out["path"]).read_text()
-    assert card["id"] + "#attempt" in text and "逐项证据与统计口径" in text
+    assert card["id"] not in text
+    assert any(c["key"] == "attempt" for c in case.get(card["id"])["event"]["claims"])
+    assert {"id": card["id"], "revision": card["revision"]} in out["snapshot"]
     card = events.revise_event(case, card["id"], card["revision"], evt(r), [r], "Review explanation updated")
     with pytest.raises(ValueError, match="DELIVERY_UNREVIEWED"):
         report.render_report(case, "Bounded observation", [], [])

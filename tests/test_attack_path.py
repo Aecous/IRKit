@@ -4,7 +4,7 @@ import pytest
 
 from irkit import board, events
 from irkit.integrity import fact_hash
-from irkit.report_template import attack_path_section, build_chains
+from irkit.report_template import chapters, event_order
 
 
 def event(title, stage=None):
@@ -67,17 +67,17 @@ def test_revise_event_preserves_annotations(case, dataset):
     assert revised["event"]["stage"] == "credential" and revised["event"]["chains"] == ["main"]
 
 
-def test_build_chains_and_render(case, dataset):
+def test_annotations_do_not_automatically_create_report_connections(case, dataset):
     a = make_card(case, dataset, "enumeration")
     b = make_card(case, dataset, "admin login")
-    events.annotate_path(case, a["id"], a["revision"], stage="recon", chains=["main"],
-                         key_time="2026-01-01T01:00:00+08:00")
-    events.annotate_path(case, b["id"], b["revision"], stage="credential", chains=["main"],
-                         key_time="2026-01-01T02:00:00+08:00")
-    live = [case.get(a["id"], "card"), case.get(b["id"], "card")]
-    chains = build_chains(live, [])
-    assert list(chains) == ["main"] and [c["id"] for c in chains["main"]] == [a["id"], b["id"]]
-    lines = attack_path_section(case, live, [], lambda oid: f"[{oid}]")
+    for card, time in ((a, "2026-01-01T01:00:00+08:00"), (b, "2026-01-01T02:00:00+08:00")):
+        events.annotate_path(
+            case, card["id"], card["revision"], stage="recon", chains=["main"], key_time=time
+        )
+    live = [case.get(a["id"]), case.get(b["id"])]
+    assert [c["id"] for c in sorted(live, key=event_order)] == [a["id"], b["id"]]
+    lines, labels = chapters(case, {}, "Unrelated observations", None, live, [], [], [dataset], [], [])
     text = "\n".join(lines)
-    assert "```mermaid" in text and "时间相邻" in text
-    assert "没有执行/持久化" in text  # gap note: foothold without advanced stage
+    assert "```mermaid" not in text and "时间相邻" not in text
+    assert "现有结果尚不足" in text
+    assert not labels  # The author must select and cite actual facts before a path is published.

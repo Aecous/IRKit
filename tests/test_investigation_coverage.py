@@ -48,7 +48,7 @@ for n in (1, 1, 3):
         record_input_gap(case, duplicate, "Unavailable", [first["id"]])
     record_input_gap(case, c, "Parser emitted no rows for this input", [first["run_id"]])
     assert closure_readiness(case)["ready"]
-    path = report.render_report(case, "Input audit", [], [], "progress")["path"]
+    path = report.render_report(case, "Input audit", [], [], "progress")["appendix_path"]
     assert "已验证重复" in case.path(path).read_text()
     assert "Parser emitted no rows" in case.path(path).read_text()
 
@@ -139,7 +139,8 @@ for n, text in records(SOURCE_IDS[0]):
             [],
             [],
             report_content=dict(
-                scope_note="Fixture", conclusions=[known], impacts=[unknown], recommendations=[unknown]
+                scope_note="Fixture", conclusions=[known], impacts=[unknown], recommendations=[unknown],
+                attack_chains=[], post_exploitation=[], timeline=[], sources=[]
             ),
         )
 
@@ -148,7 +149,8 @@ for n, text in records(SOURCE_IDS[0]):
     event["sources"] = [{**source, "check_ids": [check["id"]]}]
     card = events.revise_event(case, card["id"], card["revision"], event, [], "Attach checked profile")
     out = final(card)
-    assert "保存 2/2 组" in case.path(out["path"]).read_text()
+    assert "保存 2/2 组" not in case.path(out["path"]).read_text()
+    assert case.get(check["id"])["query_ids"] == [query["id"]]
     case.update(check["id"], {"status": "stale"})
     from irkit.source_profile import source_issues
 

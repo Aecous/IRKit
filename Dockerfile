@@ -15,9 +15,11 @@ COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
 COPY scripts ./scripts
 COPY examples ./examples
-RUN uv python install 3.12 && uv sync --locked
+RUN uv python install 3.12 && uv sync --locked --no-build-package evtx && \
+    /opt/irkit/.venv/bin/python -c 'from evtx import PyEvtxParser'
 
 ENV PATH=/opt/irkit/.venv/bin:/usr/local/bin:$PATH \
+    IRKIT_EVTX_PYTHON=/opt/irkit/.venv/bin/python \
     HOME=/root \
     PYTHONUNBUFFERED=1 \
     DISABLE_AUTOUPDATER=1 \
